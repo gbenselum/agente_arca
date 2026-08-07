@@ -34,3 +34,7 @@ downloads/
 # Invoices data storage (sample confidential PDFs)
 invoices/private/
 output/
+
+# Vista Previa (user's confidential PDFs)
+vistaprevia/*.pdf
+

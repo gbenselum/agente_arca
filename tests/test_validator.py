@@ -67,6 +67,38 @@ class TestARCAValidator(unittest.TestCase):
         }
         self.assertTrue(is_invoice_already_in_f572(duplicate_inv, f572_data))
 
+    def test_duplicate_check_by_month_and_amount(self):
+        f572_data = {
+            "taxpayer_cuit": "20123456789",
+            "fiscal_year": 2026,
+            "loaded_invoices": [
+                {
+                    "vendor_cuit": "33611969959",
+                    "point_of_sale": None,
+                    "receipt_number": None,
+                    "total_amount": 424665.74,
+                    "month": 3
+                }
+            ]
+        }
+        
+        duplicate_inv = {
+            "vendor_cuit": "33611969959",
+            "point_of_sale": 1,
+            "receipt_number": 4455,
+            "total_amount": 424665.74,
+            "issue_date": "2026-03-15"
+        }
+        non_duplicate_inv = {
+            "vendor_cuit": "33611969959",
+            "point_of_sale": 1,
+            "receipt_number": 4456,
+            "total_amount": 424665.74,
+            "issue_date": "2026-04-15"  # Different month
+        }
+        self.assertTrue(is_invoice_already_in_f572(duplicate_inv, f572_data))
+        self.assertFalse(is_invoice_already_in_f572(non_duplicate_inv, f572_data))
+
     def test_sync_f572_to_env(self):
         f572_data = {
             "taxpayer_cuit": "20123456789",
