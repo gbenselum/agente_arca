@@ -1,0 +1,95 @@
+{
+  "tools": [
+    {
+      "name": "parse_and_extract_invoice",
+      "description": "Extracts structured tax details from OCR text or document images.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "raw_text": {
+            "type": "string"
+          },
+          "file_path": {
+            "type": "string"
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "raw_text"
+            ]
+          },
+          {
+            "required": [
+              "file_path"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "validate_deduction_eligibility",
+      "description": "Verifies tax parameters before computing deductible amounts.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "invoice_data": {
+            "type": "object"
+          },
+          "taxpayer_data": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "invoice_data",
+          "taxpayer_data"
+        ]
+      }
+    },
+    {
+      "name": "compute_deductions_engine",
+      "description": "Calculates net deductible amount and applies category specific formulas.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "invoice_data": {
+            "type": "object"
+          },
+          "siradig_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "invoice_data",
+          "siradig_code"
+        ]
+      }
+    },
+    {
+      "name": "generate_siradig_payload",
+      "description": "Compiles all validated deductions for the specified fiscal year into the standard JSON format for SiRADIG F.572 Web.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "taxpayer_cuit": {
+            "type": "string"
+          },
+          "fiscal_year": {
+            "type": "integer"
+          },
+          "deductions_list": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "taxpayer_cuit",
+          "fiscal_year",
+          "deductions_list"
+        ]
+      }
+    }
+  ]
+}
