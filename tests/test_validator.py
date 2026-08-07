@@ -1,9 +1,17 @@
+"""
+Comprehensive validator and integration test suite for ARCA agent.
+"""
+
 import os
 import unittest
 from pathlib import Path
+
 from src.validator.legal_validator import validate_cuit, validate_invoice_legal_requirements
 from src.engine.deduction_calculator import compute_deduction
 from src.parser.f572_parser import is_invoice_already_in_f572, parse_f572_pdf_text, sync_f572_to_env
+from src.models.invoice import InvoiceData, ReceiptType, SiRADIGCategory
+from src.models.f572 import DependentModel, F572Data
+
 
 class TestARCAValidator(unittest.TestCase):
     def test_validate_cuit_format(self):
@@ -27,9 +35,10 @@ class TestARCAValidator(unittest.TestCase):
             "first_name": "Juan",
             "last_name": "Perez",
             "cuit": "20456789014",
-            "relationship": "HIJO"
+            "relationship": "HIJO",
+            "birth_date": "2015-05-10"
         }]
-        
+
         is_valid, errors = validate_invoice_legal_requirements(invoice, dependents, 2026)
         self.assertTrue(is_valid, f"Expected valid invoice, but got errors: {errors}")
         self.assertEqual(len(errors), 0)
@@ -58,7 +67,7 @@ class TestARCAValidator(unittest.TestCase):
                 }
             ]
         }
-        
+
         duplicate_inv = {
             "vendor_cuit": "30711234567",
             "point_of_sale": 5,
@@ -81,7 +90,7 @@ class TestARCAValidator(unittest.TestCase):
                 }
             ]
         }
-        
+
         duplicate_inv = {
             "vendor_cuit": "33611969959",
             "point_of_sale": 1,
@@ -104,17 +113,18 @@ class TestARCAValidator(unittest.TestCase):
             "taxpayer_cuit": "20123456789",
             "fiscal_year": 2026,
             "dependents": [
-                {"cuit": "20551234569", "name": "Mateo Perez"}
+                {"cuit": "20551234569", "name": "Mateo Perez", "birth_date": "2018-04-12"}
             ]
         }
         test_env_path = "tests/test_temp.env"
         success = sync_f572_to_env(f572_data, test_env_path)
         self.assertTrue(success)
         self.assertTrue(Path(test_env_path).exists())
-        
+
         # Clean up temporary test env file
         if Path(test_env_path).exists():
             os.remove(test_env_path)
+
 
 if __name__ == "__main__":
     unittest.main()

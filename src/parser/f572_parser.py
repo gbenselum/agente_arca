@@ -1,23 +1,30 @@
 """
-F.572 PDF Parser, Env Sync & Duplicate Verification Module.
+F.572 PDF Parser, Safe Env Sync & Duplicate Verification Module.
 Extracts existing loaded items and registered dependents from an official ARCA F.572 "Vista Previa" PDF export
-located in the 'vistaprevia/' directory, populates .env variables, and converts it to JSON.
+located in the 'vistaprevia/' directory, safely syncs .env variables, and converts it to JSON.
 """
 
 import os
 import json
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
+
+from ..models.f572 import F572Data, DependentModel, F572LoadedInvoice
+from ..models.invoice import InvoiceData
+from ..utils.logger import logger
+from ..utils.env_manager import safe_update_env
 
 try:
     from pypdf import PdfReader
 except ImportError:
     PdfReader = None
 
+
 def extract_text_from_f572_pdf(pdf_path: str) -> str:
     """Extracts text from F.572 PDF in vistaprevia/ directory."""
     if not PdfReader:
+        logger.error("pypdf is not installed. Cannot read F.572 PDF.")
         return ""
     try:
         reader = PdfReader(pdf_path)
@@ -28,12 +35,13 @@ def extract_text_from_f572_pdf(pdf_path: str) -> str:
                 text += extracted + "\n"
         return text
     except Exception as e:
-        print(f"Error reading F.572 PDF {pdf_path}: {e}")
+        logger.error(f"Error reading F.572 PDF {pdf_path}: {e}")
         return ""
 
-def parse_f572_pdf_text(raw_text: str) -> Dict[str, Any]:
+
+def parse_f572_pdf_text(raw_text: str) -> F572Data:
     """
-    Parses raw text of an F.572 PDF document into structured sections, loaded invoices list, and registered dependents.
+    Parses raw text of an F.572 PDF document into structured F572Data model.
     """
     f572_data = {
         "taxpayer_cuit": "",
@@ -50,7 +58,7 @@ def parse_f572_pdf_text(raw_text: str) -> Dict[str, Any]:
         f572_data["taxpayer_cuit"] = cuit_match.group(1).replace("-", "")
 
     # Extract Apellido y Nombre (Taxpayer Name)
-    name_match = re.search(r'Apellido y Nombre\s*:?\s*([^\n]+)', raw_text, re.IGNORECASE)
+    name_match = re.search(r'Apellido y Nombre\s*:?\s*([^\n\r]+)', raw_text, re.IGNORECASE)
     if name_match:
         f572_data["taxpayer_name"] = name_match.group(1).strip()
 
@@ -61,13 +69,13 @@ def parse_f572_pdf_text(raw_text: str) -> Dict[str, Any]:
 
     # Extract Registered Dependents (Cargas de Familia: Hijos / Hijas / Cónyuge)
     seen_dependents = set()
-    
-    # Pattern 1: CUIL/CUIT <11 digits><Name> <DD/MM/YYYY> (typically found in newer PDF table exports)
+
+    # Pattern 1: CUIL/CUIT <11 digits><Name> <DD/MM/YYYY> (standard tabular export)
     dependent_pattern_1 = re.compile(
         r'(?:CUIL|CUIT|C\.U\.I\.T\.)\s*:?\s*(\d{11})\s*([A-Za-zÁÉÍÓÚáéíóúñÑ\s,.-]+?)\s+(\d{2}/\d{2}/\d{4})',
         re.IGNORECASE
     )
-    
+
     # Pattern 2: Fallback pattern
     dependent_pattern_2 = re.compile(
         r'(?:HIJO|HIJA|CONYUGE|CÓNYUGE)\s*[\s\S]*?'
@@ -78,26 +86,43 @@ def parse_f572_pdf_text(raw_text: str) -> Dict[str, Any]:
 
     for match in dependent_pattern_1.finditer(raw_text):
         cuit = match.group(1).replace("-", "")
-        name = match.group(2).strip()
-        name = re.sub(r'^,\s*|\s*,$', '', name).strip()
+        raw_name = match.group(2).strip()
+        raw_name = re.sub(r'^,\s*|\s*,$', '', raw_name).strip()
+        b_date_raw = match.group(3)
+        b_parts = b_date_raw.split("/")
+        birth_date_iso = f"{b_parts[2]}-{b_parts[1]}-{b_parts[0]}" if len(b_parts) == 3 else ""
+
         if cuit not in seen_dependents:
             seen_dependents.add(cuit)
-            f572_data["dependents"].append({
-                "cuit": cuit,
-                "name": name
-            })
+            if "," in raw_name:
+                last_name, first_name = [p.strip() for p in raw_name.split(",", 1)]
+            else:
+                parts = raw_name.split(None, 1)
+                last_name = parts[0]
+                first_name = parts[1] if len(parts) > 1 else ""
+
+            f572_data["dependents"].append(DependentModel(
+                cuit=cuit,
+                first_name=first_name,
+                last_name=last_name,
+                birth_date=birth_date_iso,
+                relationship="HIJO"
+            ))
 
     if not f572_data["dependents"]:
         for match in dependent_pattern_2.finditer(raw_text):
             cuit = match.group(1).replace("-", "")
-            name = match.group(2).strip()
-            name = re.sub(r'^,\s*|\s*,$', '', name).strip()
+            raw_name = match.group(2).strip()
+            raw_name = re.sub(r'^,\s*|\s*,$', '', raw_name).strip()
             if cuit not in seen_dependents:
                 seen_dependents.add(cuit)
-                f572_data["dependents"].append({
-                    "cuit": cuit,
-                    "name": name
-                })
+                parts = raw_name.split(None, 1)
+                f572_data["dependents"].append(DependentModel(
+                    cuit=cuit,
+                    first_name=parts[1] if len(parts) > 1 else "",
+                    last_name=parts[0] if len(parts) > 0 else "",
+                    relationship="HIJO"
+                ))
 
     # Regex pattern to capture invoices listed in F.572 tables:
     invoice_pattern = re.compile(
@@ -117,12 +142,12 @@ def parse_f572_pdf_text(raw_text: str) -> Dict[str, Any]:
         except ValueError:
             amount = 0.0
 
-        f572_data["loaded_invoices"].append({
-            "vendor_cuit": cuit,
-            "point_of_sale": pos,
-            "receipt_number": number,
-            "total_amount": amount
-        })
+        f572_data["loaded_invoices"].append(F572LoadedInvoice(
+            vendor_cuit=cuit,
+            point_of_sale=pos,
+            receipt_number=number,
+            total_amount=amount
+        ))
 
     # Map Spanish months to numbers
     SPANISH_MONTH_MAP = {
@@ -130,7 +155,7 @@ def parse_f572_pdf_text(raw_text: str) -> Dict[str, Any]:
         "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12
     }
 
-    # Extract monthly deductions (e.g. Gastos de Educación)
+    # Extract monthly deductions (e.g. Gastos de Educación / Servicio Doméstico)
     months_regex = r'(?:Enero|Febrero|Marzo|Abril|Mayo|Junio|Julio|Agosto|Septiembre|Octubre|Noviembre|Diciembre)'
     monthly_deduction_pattern = re.compile(
         r'(\d{11})\s*-\s*(.+?)\s+([\d.,]+)Subtotal:\s*\$\n'
@@ -151,91 +176,73 @@ def parse_f572_pdf_text(raw_text: str) -> Dict[str, Any]:
         # Avoid duplicate entries in loaded_invoices
         is_duplicate = False
         for existing in f572_data["loaded_invoices"]:
-            if (existing.get("vendor_cuit") == cuit and 
-                existing.get("month") == month_num and 
-                abs(existing.get("total_amount", 0.0) - amount) < 0.01 and
-                existing.get("point_of_sale") is None and
-                existing.get("receipt_number") is None):
+            if (existing.vendor_cuit == cuit and 
+                existing.month == month_num and 
+                abs(existing.total_amount - amount) < 0.01 and
+                existing.point_of_sale is None and
+                existing.receipt_number is None):
                 is_duplicate = True
                 break
-        
+
         if not is_duplicate:
             vendor_name = match.group(2).strip()
-            invoice_entry = {
-                "vendor_cuit": cuit,
-                "vendor_name": vendor_name,
-                "point_of_sale": None,
-                "receipt_number": None,
-                "total_amount": amount,
-                "month": month_num
-            }
+            invoice_entry = F572LoadedInvoice(
+                vendor_cuit=cuit,
+                vendor_name=vendor_name,
+                point_of_sale=None,
+                receipt_number=None,
+                total_amount=amount,
+                month=month_num
+            )
             if match.group(6):
-                invoice_entry["dependent_cuit"] = match.group(6).replace("-", "")
-                invoice_entry["dependent_name"] = match.group(7).strip()
+                invoice_entry.dependent_cuit = match.group(6).replace("-", "")
+                invoice_entry.dependent_name = match.group(7).strip()
 
             f572_data["loaded_invoices"].append(invoice_entry)
 
-    return f572_data
+    return F572Data(**f572_data)
 
-def sync_f572_to_env(f572_data: Dict[str, Any], env_file_path: str = ".env") -> bool:
+
+def sync_f572_to_env(f572_data: Union[F572Data, Dict[str, Any]], env_file_path: str = ".env") -> bool:
     """
-    Loads/syncs extracted F.572 values (Taxpayer CUIT, Fiscal Year, Dependents CUIT/Names)
-    into the .env configuration file.
+    Safely syncs extracted F.572 values (Taxpayer CUIT, Fiscal Year, Dependents)
+    into the .env configuration file without destroying existing comments or other variables.
     """
-    env_path = Path(env_file_path)
-    existing_lines = []
-    if env_path.exists():
-        with open(env_path, "r", encoding="utf-8") as f:
-            existing_lines = f.readlines()
+    if isinstance(f572_data, dict):
+        data = F572Data(**f572_data)
+    else:
+        data = f572_data
 
-    env_map = {}
-    for line in existing_lines:
-        line_str = line.strip()
-        if line_str and not line_str.startswith("#") and "=" in line_str:
-            key, val = line_str.split("=", 1)
-            env_map[key.strip()] = val.strip()
+    updates: Dict[str, Any] = {}
 
-    # Update extracted taxpayer details
-    if f572_data.get("taxpayer_cuit"):
-        env_map["ARCA_CUIL"] = f572_data["taxpayer_cuit"]
-        env_map["TAXPAYER_CUIT"] = f572_data["taxpayer_cuit"]
-    if f572_data.get("taxpayer_name"):
-        env_map["TAXPAYER_NAME"] = f572_data["taxpayer_name"]
-    if f572_data.get("fiscal_year"):
-        env_map["FISCAL_YEAR"] = str(f572_data["fiscal_year"])
+    if data.taxpayer_cuit:
+        updates["ARCA_CUIL"] = data.taxpayer_cuit
+        updates["TAXPAYER_CUIT"] = data.taxpayer_cuit
+    if data.taxpayer_name:
+        updates["TAXPAYER_NAME"] = data.taxpayer_name
+    if data.fiscal_year:
+        updates["FISCAL_YEAR"] = data.fiscal_year
 
-    # Update dependents from F.572
-    for idx, dep in enumerate(f572_data.get("dependents", []), start=1):
-        env_map[f"DEPENDENT_{idx}_CUIT"] = dep.get("cuit", "")
-        if dep.get("name"):
-            name_str = dep["name"]
-            if "," in name_str:
-                parts = [p.strip() for p in name_str.split(",", 1)]
-                last_name = parts[0]
-                first_name = parts[1]
-            else:
-                parts = name_str.split(None, 1)
-                last_name = parts[0]
-                first_name = parts[1] if len(parts) > 1 else ""
+    for idx, dep in enumerate(data.dependents, start=1):
+        updates[f"DEPENDENT_{idx}_CUIT"] = dep.cuit
+        if dep.first_name:
+            updates[f"DEPENDENT_{idx}_FIRST_NAME"] = dep.first_name
+        if dep.last_name:
+            updates[f"DEPENDENT_{idx}_LAST_NAME"] = dep.last_name
+        if dep.relationship:
+            updates[f"DEPENDENT_{idx}_RELATIONSHIP"] = dep.relationship
+        if dep.birth_date:
+            updates[f"DEPENDENT_{idx}_BIRTH_DATE"] = dep.birth_date
+        updates[f"DEPENDENT_{idx}_PERCENTAGE"] = dep.percentage
 
-            env_map[f"DEPENDENT_{idx}_FIRST_NAME"] = first_name
-            env_map[f"DEPENDENT_{idx}_LAST_NAME"] = last_name
+    return safe_update_env(updates, env_file_path=env_file_path)
 
 
-    # Re-write .env file
-    with open(env_path, "w", encoding="utf-8") as f:
-        f.write("# Automatically synced from F.572 PDF in vistaprevia/\n")
-        for k, v in env_map.items():
-            f.write(f"{k}={v}\n")
-
-    print(f"Synced F.572 parameters into environment file: {env_path}")
-    return True
-
-def process_vistaprevia_f572(pdf_file_path: str, sync_env: bool = True) -> Dict[str, Any]:
+def process_vistaprevia_f572(pdf_file_path: str, sync_env: bool = True) -> F572Data:
     """
     Reads F.572 PDF from vistaprevia/, parses existing loaded invoices & dependents,
     writes a corresponding .json extract file with the same base name,
-    and automatically syncs extracted values into .env file.
+    and safely syncs extracted values into .env file.
     """
     pdf_path = Path(pdf_file_path)
     if not pdf_path.exists():
@@ -243,31 +250,46 @@ def process_vistaprevia_f572(pdf_file_path: str, sync_env: bool = True) -> Dict[
 
     raw_text = extract_text_from_f572_pdf(str(pdf_path))
     parsed_data = parse_f572_pdf_text(raw_text)
-    parsed_data["source_pdf"] = pdf_path.name
+    parsed_data.source_pdf = pdf_path.name
 
     json_path = pdf_path.with_suffix(".json")
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(parsed_data, f, indent=2, ensure_ascii=False)
+        json.dump(parsed_data.model_dump(), f, indent=2, ensure_ascii=False)
 
     if sync_env:
         sync_f572_to_env(parsed_data)
 
-    print(f"Extracted F.572 JSON saved to: {json_path}")
+    logger.info(f"Extracted F.572 JSON saved to: {json_path}")
     return parsed_data
 
-def is_invoice_already_in_f572(invoice: Dict[str, Any], f572_data: Dict[str, Any]) -> bool:
+
+def is_invoice_already_in_f572(
+    invoice: Union[InvoiceData, Dict[str, Any]],
+    f572_data: Union[F572Data, Dict[str, Any]]
+) -> bool:
     """
     Validates whether a candidate invoice (vendor_cuit, POS, receipt_number, or month/amount)
     is already present in the extracted F.572 data.
     """
-    cand_cuit = re.sub(r'\D', '', invoice.get("vendor_cuit", ""))
-    cand_pos = invoice.get("point_of_sale")
-    cand_num = invoice.get("receipt_number")
-    cand_amount = float(invoice.get("total_amount") or 0.0)
+    if isinstance(invoice, InvoiceData):
+        cand_cuit = invoice.vendor_cuit
+        cand_pos = invoice.point_of_sale
+        cand_num = invoice.receipt_number
+        cand_amount = invoice.total_amount
+        issue_date_str = invoice.issue_date
+    else:
+        cand_cuit = re.sub(r'\D', '', invoice.get("vendor_cuit", ""))
+        cand_pos = invoice.get("point_of_sale")
+        cand_num = invoice.get("receipt_number")
+        cand_amount = float(invoice.get("total_amount") or 0.0)
+        issue_date_str = invoice.get("issue_date", "")
 
-    # Parse month from candidate invoice (issue_date format is YYYY-MM-DD)
+    if isinstance(f572_data, F572Data):
+        loaded_list = f572_data.loaded_invoices
+    else:
+        loaded_list = [F572LoadedInvoice(**x) for x in f572_data.get("loaded_invoices", [])]
+
     cand_month = None
-    issue_date_str = invoice.get("issue_date", "")
     if issue_date_str:
         parts = issue_date_str.split("-")
         if len(parts) >= 2:
@@ -276,25 +298,27 @@ def is_invoice_already_in_f572(invoice: Dict[str, Any], f572_data: Dict[str, Any
             except ValueError:
                 pass
 
-    for item in f572_data.get("loaded_invoices", []):
-        item_cuit = re.sub(r'\D', '', item.get("vendor_cuit", ""))
+    for item in loaded_list:
+        item_cuit = item.vendor_cuit
         if cand_cuit != item_cuit:
             continue
 
-        item_pos = item.get("point_of_sale")
-        item_num = item.get("receipt_number")
+        item_pos = item.point_of_sale
+        item_num = item.receipt_number
 
         # 1. Match by POS and Receipt Number if both are present in candidate and item
         if cand_pos is not None and cand_num is not None and item_pos is not None and item_num is not None:
             if cand_pos == item_pos and cand_num == item_num:
+                logger.info(f"Duplicate detected: Invoice {cand_cuit}-{cand_pos}-{cand_num} already in F.572")
                 return True
 
         # 2. Match by Month and Amount if POS/Num are missing from loaded item (e.g. monthly aggregates)
-        item_month = item.get("month")
-        item_amount = float(item.get("total_amount") or 0.0)
+        item_month = item.month
+        item_amount = item.total_amount
 
         if (item_pos is None or item_num is None) and cand_month is not None and item_month is not None:
             if cand_month == item_month and abs(cand_amount - item_amount) < 0.01:
+                logger.info(f"Duplicate detected by month {cand_month} and amount ${cand_amount} for CUIT {cand_cuit}")
                 return True
 
     return False
