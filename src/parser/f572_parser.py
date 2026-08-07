@@ -1,0 +1,181 @@
+"""
+F.572 PDF Parser, Env Sync & Duplicate Verification Module.
+Extracts existing loaded items and registered dependents from an official ARCA F.572 "Vista Previa" PDF export
+located in the 'vistaprevia/' directory, populates .env variables, and converts it to JSON.
+"""
+
+import os
+import json
+import re
+from typing import Dict, Any, List
+from pathlib import Path
+
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
+
+def extract_text_from_f572_pdf(pdf_path: str) -> str:
+    """Extracts text from F.572 PDF in vistaprevia/ directory."""
+    if not PdfReader:
+        return ""
+    try:
+        reader = PdfReader(pdf_path)
+        text = ""
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+        return text
+    except Exception as e:
+        print(f"Error reading F.572 PDF {pdf_path}: {e}")
+        return ""
+
+def parse_f572_pdf_text(raw_text: str) -> Dict[str, Any]:
+    """
+    Parses raw text of an F.572 PDF document into structured sections, loaded invoices list, and registered dependents.
+    """
+    f572_data = {
+        "taxpayer_cuit": "",
+        "taxpayer_name": "",
+        "fiscal_year": None,
+        "presentation_date": "",
+        "dependents": [],
+        "loaded_invoices": []
+    }
+
+    # Extract CUIT del declarante
+    cuit_match = re.search(r'(?:CUIT|C\.U\.I\.T\.)\s*:?\s*(\d{2}-?\d{8}-?\d{1})', raw_text, re.IGNORECASE)
+    if cuit_match:
+        f572_data["taxpayer_cuit"] = cuit_match.group(1).replace("-", "")
+
+    # Extract Período Fiscal
+    periodo_match = re.search(r'(?:PERIODO|PERÍODO)\s*FISCAL\s*:?\s*(\d{4})', raw_text, re.IGNORECASE)
+    if periodo_match:
+        f572_data["fiscal_year"] = int(periodo_match.group(1))
+
+    # Extract Registered Dependents (Cargas de Familia: Hijos / Hijas / Cónyuge)
+    dependent_pattern = re.compile(
+        r'(?:HIJO|HIJA|CONYUGE|CÓNYUGE)\s*[\s\S]*?'
+        r'(?:CUIT|C\.U\.I\.T\.|CUIL)\s*:?\s*(\d{2}-?\d{8}-?\d{1})[\s\S]*?'
+        r'Nombre(?:s)?\s*:?\s*([A-Za-zÁÉÍÓÚáéíóúñÑ\s]+)',
+        re.IGNORECASE
+    )
+    for match in dependent_pattern.finditer(raw_text):
+        f572_data["dependents"].append({
+            "cuit": match.group(1).replace("-", ""),
+            "name": match.group(2).strip()
+        })
+
+    # Regex pattern to capture invoices listed in F.572 tables:
+    invoice_pattern = re.compile(
+        r'(?:CUIT|C\.U\.I\.T\.)\s*:?\s*(\d{2}-?\d{8}-?\d{1})[\s\S]*?'
+        r'(\d{4,5})\s*-\s*(\d{8})[\s\S]*?'
+        r'\$?\s*([\d.,]+)',
+        re.IGNORECASE
+    )
+
+    for match in invoice_pattern.finditer(raw_text):
+        cuit = match.group(1).replace("-", "")
+        pos = int(match.group(2))
+        number = int(match.group(3))
+        amount_str = match.group(4).replace(".", "").replace(",", ".")
+        try:
+            amount = float(amount_str)
+        except ValueError:
+            amount = 0.0
+
+        f572_data["loaded_invoices"].append({
+            "vendor_cuit": cuit,
+            "point_of_sale": pos,
+            "receipt_number": number,
+            "total_amount": amount
+        })
+
+    return f572_data
+
+def sync_f572_to_env(f572_data: Dict[str, Any], env_file_path: str = ".env") -> bool:
+    """
+    Loads/syncs extracted F.572 values (Taxpayer CUIT, Fiscal Year, Dependents CUIT/Names)
+    into the .env configuration file.
+    """
+    env_path = Path(env_file_path)
+    existing_lines = []
+    if env_path.exists():
+        with open(env_path, "r", encoding="utf-8") as f:
+            existing_lines = f.readlines()
+
+    env_map = {}
+    for line in existing_lines:
+        line_str = line.strip()
+        if line_str and not line_str.startswith("#") and "=" in line_str:
+            key, val = line_str.split("=", 1)
+            env_map[key.strip()] = val.strip()
+
+    # Update extracted taxpayer CUIT and fiscal year
+    if f572_data.get("taxpayer_cuit"):
+        env_map["ARCA_CUIL"] = f572_data["taxpayer_cuit"]
+        env_map["TAXPAYER_CUIT"] = f572_data["taxpayer_cuit"]
+    if f572_data.get("fiscal_year"):
+        env_map["FISCAL_YEAR"] = str(f572_data["fiscal_year"])
+
+    # Update dependents from F.572
+    for idx, dep in enumerate(f572_data.get("dependents", []), start=1):
+        env_map[f"DEPENDENT_{idx}_CUIT"] = dep.get("cuit", "")
+        if dep.get("name"):
+            names = dep["name"].split()
+            env_map[f"DEPENDENT_{idx}_FIRST_NAME"] = names[0]
+            if len(names) > 1:
+                env_map[f"DEPENDENT_{idx}_LAST_NAME"] = " ".join(names[1:])
+
+    # Re-write .env file
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.write("# Automatically synced from F.572 PDF in vistaprevia/\n")
+        for k, v in env_map.items():
+            f.write(f"{k}={v}\n")
+
+    print(f"Synced F.572 parameters into environment file: {env_path}")
+    return True
+
+def process_vistaprevia_f572(pdf_file_path: str, sync_env: bool = True) -> Dict[str, Any]:
+    """
+    Reads F.572 PDF from vistaprevia/, parses existing loaded invoices & dependents,
+    writes a corresponding .json extract file with the same base name,
+    and automatically syncs extracted values into .env file.
+    """
+    pdf_path = Path(pdf_file_path)
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"F.572 PDF file not found at: {pdf_file_path}")
+
+    raw_text = extract_text_from_f572_pdf(str(pdf_path))
+    parsed_data = parse_f572_pdf_text(raw_text)
+    parsed_data["source_pdf"] = pdf_path.name
+
+    json_path = pdf_path.with_suffix(".json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(parsed_data, f, indent=2, ensure_ascii=False)
+
+    if sync_env:
+        sync_f572_to_env(parsed_data)
+
+    print(f"Extracted F.572 JSON saved to: {json_path}")
+    return parsed_data
+
+def is_invoice_already_in_f572(invoice: Dict[str, Any], f572_data: Dict[str, Any]) -> bool:
+    """
+    Validates whether a candidate invoice (vendor_cuit, POS, receipt_number)
+    is already present in the extracted F.572 data.
+    """
+    cand_cuit = re.sub(r'\D', '', invoice.get("vendor_cuit", ""))
+    cand_pos = invoice.get("point_of_sale")
+    cand_num = invoice.get("receipt_number")
+
+    for item in f572_data.get("loaded_invoices", []):
+        item_cuit = re.sub(r'\D', '', item.get("vendor_cuit", ""))
+        item_pos = item.get("point_of_sale")
+        item_num = item.get("receipt_number")
+
+        if cand_cuit == item_cuit and cand_pos == item_pos and cand_num == item_num:
+            return True
+
+    return False

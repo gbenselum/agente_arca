@@ -2,133 +2,92 @@
 
 ## 1. System Overview & Purpose
 
-This skill definition equips an AI Agent (integrated via Model Context Protocol - MCP) to validate, categorize, and structure deduction data for Argentina's **Impuesto a las Ganancias (4ta Categoría - Trabajadores en Relación de Dependencia)**. 
+This skill equips the **Antigravity AI Agent** to process, legally validate, deduplicate, and load tax deduction receipts (*facturas*) directly into **ARCA / AFIP - SiRADIG Trabajador (Formulario 572 Web)** in **DRAFT mode** (`Borrador`).
 
-The agent operates as a tax assistant that receives invoice/receipt metadata (via OCR or document ingestion), validates compliance with **ARCA** (Agencia de Recaudación y Control Aduanero, ex-AFIP) rules under Resolution **RG 4003/17** and modifications, calculates deductible amounts, and formats JSON payloads ready for transmission or manual load into **SiRADIG - Formulario 572 Web**.
+The agent follows a 2-step verification & extraction workflow:
+1. **F.572 PDF Extraction & `.env` Sync**: Inspects the `vistaprevia/` folder for the current F.572 export PDF, extracts its content into a JSON file (`vistaprevia/<pdf_name>.json`), **automatically loads taxpayer & dependent parameters into `.env`**, and checks candidate invoices against existing loaded receipts to avoid duplicates.
+2. **Legal Validation & Draft Upload**: Validates CUIT, CAE, and fiscal limits under **RG 4003/17**, computes eligible deductible amounts, cross-references family dependents in `.env`, and uses Playwright browser automation to save new items as drafts in SiRADIG without performing final submission (`Guardar Borrador`).
 
 ---
 
-## 2. Tax Domain Rules & Deductions Matrix
+## 2. Folder Architecture & Workflow
 
-The agent must evaluate all incoming receipts against the following regulatory criteria before approval:
+```
+agente_arca/
+├── .env.example                # Example environment file with credentials & dependents template
+├── .env                        # Protected local environment variables (Git ignored!)
+├── .gitignore                  # Strict Git rules preventing secret leaks
+├── SKILL.md                    # Comprehensive Skill & Tax Validation specification
+├── mcp_tools_schema.json       # MCP Tools definition for LLM integration
+├── vistaprevia/                # 📍 Place official F.572 "Vista Previa" PDFs here
+│   ├── F572_2026.pdf           # Input F.572 export PDF
+│   └── F572_2026.json          # Automatically extracted JSON mirror
+├── invoices/                   # 📍 Place incoming PDF invoices here
+│   ├── factura_colegio_01.pdf  # Input invoice PDF
+│   └── factura_colegio_01.json # Automatically extracted JSON mirror
+├── config/
+│   └── settings.py             # Environment configuration & credential manager
+├── src/
+│   ├── parser/
+│   │   ├── invoice_parser.py   # OCR & Vision extraction of receipt metadata to JSON
+│   │   └── f572_parser.py      # Extraction of F.572 Vista Previa PDFs, .env sync & duplicate check
+│   ├── validator/
+│   │   └── legal_validator.py  # Validation of CUIT, CAE, Fiscal dates & Dependents
+│   ├── engine/
+│   │   └── deduction_calculator.py # Math engine for deductible caps and rates (RG 4003/17)
+│   └── browser/
+│       └── siradig_automator.py # Playwright browser automation for ARCA SiRADIG
+└── tests/
+    └── test_validator.py       # Unit tests for tax logic & duplicate detection
+```
 
-| Deduction Category | Subcategory / Description | Deductible Percentage | Applicable Limit / Cap | System Key (`siradig_code`) |
+---
+
+## 3. Workflow Steps
+
+```
+ [1. F.572 PDF Ingestion (vistaprevia/)]
+            |
+            v
+ [f572_parser] --------> Creates vistaprevia/<f572_name>.json
+            | ---------> ⚡ Auto-populates .env with Taxpayer & Dependents data
+            v
+ [2. Invoice PDF Ingestion (invoices/)]
+            |
+            v
+ [invoice_parser] -----> Creates invoices/<invoice_name>.json
+            |
+            v
+ [is_invoice_already_in_f572?]
+       |                                   |
+    (YES: Duplicate)                   (NO: New Bill)
+       |                                   |
+       v                                   v
+[Skip & Report "ALREADY_LOADED"]   [3. validate_deduction_eligibility] (CUIT Mod 11, CAE, Date, Dependents)
+                                           |
+                                           v
+                                   [4. compute_deductions_engine] (RG 4003/17 Rates)
+                                           |
+                                           v
+                                   [5. siradig_automator] (Loads items -> Saves Draft F.572)
+```
+
+---
+
+## 4. Legal Matrix & Deduction Rules (ARCA RG 4003/17)
+
+| Category Key (`siradig_code`) | Deduction Category | Requisitos Legales ARCA / Documentación | Porcentaje Deducible | Tope / Límite Aplicable |
 | :--- | :--- | :--- | :--- | :--- |
-| **Gastos Médicos y Paramédicos** | Fonoaudiología, odontología, medicina general, kinesiología, psicología, etc. | **40%** del neto no reintegrado ($Importe - Reintegro$) | Hasta el **5%** de la Ganancia Neta Anual. | `MEDICO_PARAMEDICO` |
-| **Medicina Prepaga / Cuotas** | Aportes a prepagas u obras sociales (no descontados en el recibo de sueldo). | **100%** de lo abonado | Hasta el **5%** de la Ganancia Neta Anual. | `CUOTA_MEDICO_ASSIST` |
-| **Alquiler Casa-Habitación** | Contrato de alquiler de vivienda única (Locatario). | **40%** del total pagado | Menor entre el 40% y el 100% del MNI (Mínimo No Imponible). | `ALQUILER_HABITACION` |
-| **Alquiler Adicional (Ley 27.737)** | Adicional por contrato registrado en RELI (Locatario y Locador). | **10%** del valor anual | Sin límite anual. | `ALQUILER_ADICIONAL_10` |
-| **Servicio Doméstico** | Remuneraciones y contribuciones patronales (Casas Particulares). | **100%** de lo abonado | Hasta el **100%** del MNI anual. | `CASAS_PARTICULARES` |
-| **Gastos de Educación** | Servicios/herramientas educativas para cargas de familia (hasta 24 años). | **100%** de lo abonado | Hasta el **40%** del MNI anual. | `GASTOS_EDUCACION` |
-| **Intereses Hipotecarios** | Compra/construcción de vivienda única. | **100%** de los intereses | **$20.000 ARS** anuales. | `INTERES_HIPOTECARIO` |
-| **Donaciones** | Entidades exentas reconocidas por ARCA (art. 81 Ley de Ganancias). | **100%** de lo donado | Hasta el **5%** de la Ganancia Neta Anual. | `DONACIONES` |
-| **Seguros de Vida / Retiro** | Primas por seguros para caso de muerte o retiro privado. | **100%** de lo abonado | Tope fijado anualmente por norma reglamentaria. | `SEGUROS_VIDA_RETIRO` |
-| **Gastos de Sepelio** | Por fallecimiento de cargas de familia. | **100%** de lo pagado | **$996,23 ARS** por año. | `GASTOS_SEPELIO` |
+| `MEDICO_PARAMEDICO` | **Gastos Médicos y Paramédicos** | Factura del profesional / clínica. CUIT prestador y CUIT beneficiario (titular o carga). | **40%** del neto no reintegrado | Hasta **5%** de Ganancia Neta Anual. |
+| `CUOTA_MEDICO_ASSIST` | **Medicina Prepaga** | Comprobante de pago o factura de medicina prepaga. CUIT entidad. | **100%** de lo abonado | Hasta **5%** de Ganancia Neta Anual. |
+| `GASTOS_EDUCACION` | **Gastos de Educación** | Factura de colegio, universidad o útiles/libros. CUIT entidad. Para hijos/as hasta 24 años. | **100%** de lo abonado | Hasta **40%** MNI Anual. |
+| `ALQUILER_HABITACION` | **Alquiler Casa-Habitación** | Factura/recibo emitido por locador o inmobiliaria (CUIT). Contrato adjunto. | **40%** del total pagado | Menor entre 40% y 100% MNI. |
+| `CASAS_PARTICULARES` | **Servicio Doméstico** | Recibo de sueldo + VEP de aportes y contribuciones ARCA (CUIT empleado). | **100%** de lo abonado | Hasta el **100%** MNI Anual. |
 
 ---
 
-## 3. Data Schema Specifications
+## 5. Security & Browser Guardrails
 
-### 3.1 Carga de Familia Entity (`family_dependents`)
-```json
-{
-  "dependent_id": "DEP-001",
-  "cuil": "20456789019",
-  "first_name": "Juan",
-  "last_name": "Pérez",
-  "relationship": "HIJO",
-  "birth_date": "2018-05-14",
-  "is_incapacitated_for_work": false,
-  "percentage_computed": 100
-}
-```
-
-### 3.2 Invoice Processing Input (`invoice_input`)
-```json
-{
-  "invoice_id": "INV-2026-0089",
-  "vendor_cuit": "30711234567",
-  "vendor_name": "Centro Fonoaudiológico S.A.",
-  "receipt_type": "FACTURA_B",
-  "point_of_sale": 4,
-  "receipt_number": 12890,
-  "issue_date": "2026-03-15",
-  "total_amount": 45000.00,
-  "reimbursed_amount": 10000.00,
-  "concept_description": "Tratamiento fonoaudiológico mes de Marzo - Beneficiario: Juan Pérez",
-  "beneficiary_cuil": "20456789019",
-  "suggested_category": "GASTOS_MEDICOS"
-}
-```
-
----
-
-## 4. MCP Tools Interface Definition
-
-To execute this skill, the AI agent relies on the following MCP tool specifications:
-
-### Tool 1: `parse_and_extract_invoice`
-Extracts structured tax details from OCR text or document images.
-* **Inputs:** `raw_text` (string) OR `file_path` (string).
-* **Outputs:** Structured JSON matching `invoice_input`.
-
-### Tool 2: `validate_deduction_eligibility`
-Verifies tax parameters before computing deductible amounts.
-* **Inputs:** `invoice_data` (JSON), `taxpayer_data` (JSON).
-* **Validation Logic:**
-  1. CUIT format check (modulo 11 algorithm).
-  2. Fiscal year alignment (e.g., invoice date in 2026 maps to period 2026).
-  3. Validate beneficiary against registered `family_dependents` (must be under 18 or incapacitated if `relationship` is `HIJO`).
-  4. Ensure receipt type is valid (B or C for final consumer).
-
-### Tool 3: `compute_deductions_engine`
-Calculates net deductible amount and applies category specific formulas.
-* **Mathematical Formula for Medical Expenses (MEDICO_PARAMEDICO):**
-  Net Payable = Total Amount - Reimbursed Amount
-  Deductible Base = Net Payable * 0.40
-* **Output:**
-  ```json
-  {
-    "invoice_id": "INV-2026-0089",
-    "siradig_code": "MEDICO_PARAMEDICO",
-    "gross_amount": 45000.00,
-    "reimbursed_amount": 10000.00,
-    "net_out_of_pocket": 35000.00,
-    "deductible_rate": 0.40,
-    "computable_deduction": 14000.00,
-    "requires_employer_cap_check": true,
-    "cap_type": "PERCENTAGE_NET_INCOME_5"
-  }
-  ```
-
-### Tool 4: `generate_siradig_payload`
-Compiles all validated deductions for the specified fiscal year into the standard JSON format for SiRADIG F.572 Web.
-* **Inputs:** `taxpayer_cuit` (string), `fiscal_year` (integer), `deductions_list` (array of objects).
-
----
-
-## 5. Execution Flow & Guardrails
-
-```
-[Invoice/Receipt Ingestion]
-           |
-           v
-[Tool: parse_and_extract_invoice]
-           |
-           v
-[Tool: validate_deduction_eligibility] ---- (Invalid CUIT / Exceeded Age) ---> [Reject & Alert User]
-           | (Valid)
-           v
-[Tool: compute_deductions_engine]
-           |
-           v
-[Tool: generate_siradig_payload]
-```
-
-### Agent Guardrails & Strict Rules
-1. **Zero Estimation:** The agent MUST NOT guess or estimate reimbursed amounts. If unstated, it must prompt the user or set `reimbursed_amount = 0.00`.
-2. **Medicines Rule:** Standalone pharmacy invoices for medication are **NOT deductible** unless part of a clinical hospitalization stay.
-3. **Double Deduction Prevention:** If an expense (e.g., prepaga) is deducted directly on the payroll pay stub (*recibo de sueldo*), it MUST NOT be declared again via SiRADIG.
-4. **Cap Responsibility Division:**
-   * **Worker/Agent Responsibility:** Calculate the exact out-of-pocket net base and deductible percentage (e.g., 40% for medical, 100% for education).
-   * **Employer/ARCA System Responsibility:** Apply the final annual capped caps (5% net income limit or MNI annual cap) during the final liquidation (*liquidación anual*).
+1. **Credentials Security**: Store credentials and dependent details in `.env` (protected by `.gitignore`).
+2. **Draft Mode Only**: The agent ONLY clicks **"Guardar"** (`Borrador`). **NEVER** submits the form (`Enviar al Empleador`).
+3. **Interactive Window**: Executed with `BROWSER_HEADLESS=false` so the user can inspect progress on screen inside Antigravity IDE.

@@ -1,0 +1,88 @@
+import os
+import unittest
+from pathlib import Path
+from src.validator.legal_validator import validate_cuit, validate_invoice_legal_requirements
+from src.engine.deduction_calculator import compute_deduction
+from src.parser.f572_parser import is_invoice_already_in_f572, parse_f572_pdf_text, sync_f572_to_env
+
+class TestARCAValidator(unittest.TestCase):
+    def test_validate_cuit_format(self):
+        # Mathematically valid CUIT (30711234566)
+        self.assertTrue(validate_cuit("30711234566"))
+        # Invalid CUIT
+        self.assertFalse(validate_cuit("12345678901"))
+
+    def test_validate_invoice_legal_requirements(self):
+        invoice = {
+            "vendor_cuit": "30711234566",
+            "receipt_type": "FACTURA_B",
+            "point_of_sale": 4,
+            "receipt_number": 12890,
+            "issue_date": "2026-03-15",
+            "total_amount": 45000.00,
+            "reimbursed_amount": 10000.00,
+            "beneficiary_cuil": "20456789014"
+        }
+        dependents = [{
+            "first_name": "Juan",
+            "last_name": "Perez",
+            "cuit": "20456789014",
+            "relationship": "HIJO"
+        }]
+        
+        is_valid, errors = validate_invoice_legal_requirements(invoice, dependents, 2026)
+        self.assertTrue(is_valid, f"Expected valid invoice, but got errors: {errors}")
+        self.assertEqual(len(errors), 0)
+
+    def test_compute_deduction_medical(self):
+        invoice = {
+            "invoice_id": "INV-001",
+            "total_amount": 50000.00,
+            "reimbursed_amount": 10000.00
+        }
+        res = compute_deduction(invoice, "MEDICO_PARAMEDICO")
+        self.assertEqual(res["net_out_of_pocket"], 40000.00)
+        self.assertEqual(res["deductible_rate"], 0.40)
+        self.assertEqual(res["computable_deduction"], 16000.00)
+
+    def test_duplicate_check_against_f572(self):
+        f572_data = {
+            "taxpayer_cuit": "20123456789",
+            "fiscal_year": 2026,
+            "loaded_invoices": [
+                {
+                    "vendor_cuit": "30711234567",
+                    "point_of_sale": 5,
+                    "receipt_number": 12890,
+                    "total_amount": 85000.0
+                }
+            ]
+        }
+        
+        duplicate_inv = {
+            "vendor_cuit": "30711234567",
+            "point_of_sale": 5,
+            "receipt_number": 12890,
+            "total_amount": 85000.0
+        }
+        self.assertTrue(is_invoice_already_in_f572(duplicate_inv, f572_data))
+
+    def test_sync_f572_to_env(self):
+        f572_data = {
+            "taxpayer_cuit": "20123456789",
+            "fiscal_year": 2026,
+            "dependents": [
+                {"cuit": "20551234569", "name": "Mateo Perez"}
+            ]
+        }
+        test_env_path = "tests/test_temp.env"
+        success = sync_f572_to_env(f572_data, test_env_path)
+        self.assertTrue(success)
+        self.assertTrue(Path(test_env_path).exists())
+        
+        # Clean up temporary test env file
+        if Path(test_env_path).exists():
+            os.remove(test_env_path)
+
+if __name__ == "__main__":
+    unittest.main()

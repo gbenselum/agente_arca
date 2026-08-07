@@ -1,0 +1,36 @@
+# Environment Variables & Secrets (CRITICAL PROTECTION)
+.env
+*.env
+!.env.example
+.env.local
+.env.production
+
+# Agents logs & conversations
+.agents/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# Browser Automation & Screenshots/Traces
+playwright-report/
+test-results/
+screenshots/
+downloads/
+.auth/
+
+# IDE & OS Files
+.DS_Store
+.vscode/
+.idea/
+
+# Invoices data storage (sample confidential PDFs)
+invoices/private/
+output/
