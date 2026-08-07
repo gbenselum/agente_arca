@@ -1,5 +1,5 @@
 # ARCA / AFIP SiRADIG F.572 Web Automation Agent 🇦🇷
-
+NOT READY TO USE. WIP!
 This repository equips the **Antigravity AI Agent** with the skill to parse, legally validate, deduplicate, and load tax deduction invoices (*facturas*) into **ARCA / AFIP - SiRADIG Trabajador (Formulario 572 Web)** in **Draft mode** (`Borrador`).
 
 ---
