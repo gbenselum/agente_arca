@@ -81,6 +81,11 @@ playwright install chromium
 
 Run the full end-to-end pipeline or individual steps using `main.py`:
 
+> ⚠️ **Fiscal caps (MNI/GNA)**: Values for fiscal years 2025–2026 in
+> `src/engine/deduction_calculator.py` (`FISCAL_YEAR_DEFAULT_CAPS`) are **IPC projections,
+> not official AFIP figures**. The engine logs a warning whenever estimated caps are used.
+> Override them via `custom_caps` / config once AFIP publishes the official values.
+
 ```bash
 # 1. Sync F.572 export PDF to .env safely (preserves comments)
 python main.py sync-f572

@@ -2,10 +2,10 @@
 Pydantic models for invoice representation, extraction, and categories.
 """
 
-from enum import Enum
-from typing import Optional
-from pydantic import BaseModel, Field, field_validator
 import re
+from enum import Enum
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class ReceiptType(str, Enum):
@@ -38,23 +38,32 @@ class SiRADIGCategory(str, Enum):
     DONACIONES = "DONACIONES"
     SEGUROS_VIDA_RETIRO = "SEGUROS_VIDA_RETIRO"
     GASTOS_SEPELIO = "GASTOS_SEPELIO"
+    # Explicit "not auto-detectable" sentinel. Never a real SiRADIG code:
+    # invoices with this category must be categorized manually before upload.
+    UNKNOWN = "UNKNOWN"
 
 
 class InvoiceData(BaseModel):
     vendor_cuit: str = Field(default="", description="CUIT of issuing vendor without dashes")
     vendor_name: str = Field(default="", description="Legal business or professional name")
     receipt_type: ReceiptType = Field(default=ReceiptType.FACTURA_B, description="AFIP receipt classification")
-    point_of_sale: Optional[int] = Field(default=None, description="Punto de Venta (1-5 digits)")
-    receipt_number: Optional[int] = Field(default=None, description="Numero de Comprobante (1-8 digits)")
+    point_of_sale: int | None = Field(default=None, description="Punto de Venta (1-5 digits)")
+    receipt_number: int | None = Field(default=None, description="Numero de Comprobante (1-8 digits)")
     issue_date: str = Field(default="", description="Issue date in YYYY-MM-DD format")
     total_amount: float = Field(default=0.0, ge=0.0, description="Gross total invoice amount in ARS")
-    reimbursed_amount: float = Field(default=0.0, ge=0.0, description="Amount already reimbursed by health plan or employer")
+    reimbursed_amount: float = Field(
+        default=0.0, ge=0.0, description="Amount already reimbursed by health plan or employer"
+    )
     cae: str = Field(default="", description="14-digit CAE or CAEA authorization code")
     cae_due_date: str = Field(default="", description="CAE expiration date in YYYY-MM-DD")
     concept_description: str = Field(default="", description="Invoice description / line item details")
-    beneficiary_cuil: str = Field(default="", description="CUIT/CUIL of the family dependent or taxpayer benefiting from expense")
-    suggested_category: SiRADIGCategory = Field(default=SiRADIGCategory.GASTOS_EDUCACION, description="Mapped SiRADIG category key")
-    source_pdf: Optional[str] = Field(default=None, description="Source PDF filename")
+    beneficiary_cuil: str = Field(
+        default="", description="CUIT/CUIL of the family dependent or taxpayer benefiting from expense"
+    )
+    suggested_category: SiRADIGCategory = Field(
+        default=SiRADIGCategory.UNKNOWN, description="Mapped SiRADIG category key"
+    )
+    source_pdf: str | None = Field(default=None, description="Source PDF filename")
     extraction_method: str = Field(default="pypdf", description="Method used for extraction: pypdf, ocr, manual")
     extraction_confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Confidence score of the extraction")
 
@@ -74,7 +83,7 @@ class InvoiceData(BaseModel):
 
 class InvoiceParseResult(BaseModel):
     success: bool
-    invoice: Optional[InvoiceData] = None
+    invoice: InvoiceData | None = None
     raw_text: str = ""
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

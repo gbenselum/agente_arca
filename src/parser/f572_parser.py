@@ -4,26 +4,26 @@ Extracts existing loaded items and registered dependents from an official ARCA F
 located in the 'vistaprevia/' directory, safely syncs .env variables, and converts it to JSON.
 """
 
-import os
+import contextlib
 import json
 import re
-from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
+from typing import Any
 
-from ..models.f572 import F572Data, DependentModel, F572LoadedInvoice
+from ..models.f572 import DependentModel, F572Data, F572LoadedInvoice
 from ..models.invoice import InvoiceData
-from ..utils.logger import logger
 from ..utils.env_manager import safe_update_env
+from ..utils.logger import logger
 
 try:
     from pypdf import PdfReader
 except ImportError:
-    PdfReader = None
+    PdfReader = None  # type: ignore[assignment,misc]
 
 
 def extract_text_from_f572_pdf(pdf_path: str) -> str:
     """Extracts text from F.572 PDF in vistaprevia/ directory."""
-    if not PdfReader:
+    if PdfReader is None:
         logger.error("pypdf is not installed. Cannot read F.572 PDF.")
         return ""
     try:
@@ -43,51 +43,49 @@ def parse_f572_pdf_text(raw_text: str) -> F572Data:
     """
     Parses raw text of an F.572 PDF document into structured F572Data model.
     """
-    f572_data = {
-        "taxpayer_cuit": "",
-        "taxpayer_name": "",
-        "fiscal_year": None,
-        "presentation_date": "",
-        "dependents": [],
-        "loaded_invoices": []
-    }
+    taxpayer_cuit = ""
+    taxpayer_name = ""
+    fiscal_year: int | None = None
+    presentation_date = ""
+    dependents: list[DependentModel] = []
+    loaded_invoices: list[F572LoadedInvoice] = []
 
     # Extract CUIT del declarante
-    cuit_match = re.search(r'(?:CUIT|C\.U\.I\.T\.)\s*:?\s*(\d{2}-?\d{8}-?\d{1})', raw_text, re.IGNORECASE)
+    cuit_match = re.search(r"(?:CUIT|C\.U\.I\.T\.)\s*:?\s*(\d{2}-?\d{8}-?\d{1})", raw_text, re.IGNORECASE)
     if cuit_match:
-        f572_data["taxpayer_cuit"] = cuit_match.group(1).replace("-", "")
+        taxpayer_cuit = cuit_match.group(1).replace("-", "")
 
     # Extract Apellido y Nombre (Taxpayer Name)
-    name_match = re.search(r'Apellido y Nombre\s*:?\s*([^\n\r]+)', raw_text, re.IGNORECASE)
+    name_match = re.search(r"Apellido y Nombre\s*:?\s*([^\n\r]+)", raw_text, re.IGNORECASE)
     if name_match:
-        f572_data["taxpayer_name"] = name_match.group(1).strip()
+        taxpayer_name = name_match.group(1).strip()
 
     # Extract Período Fiscal
-    periodo_match = re.search(r'(?:PERIODO|PERÍODO)(?:\s*FISCAL)?\s*:?\s*(\d{4})', raw_text, re.IGNORECASE)
+    periodo_match = re.search(r"(?:PERIODO|PERÍODO)(?:\s*FISCAL)?\s*:?\s*(\d{4})", raw_text, re.IGNORECASE)
     if periodo_match:
-        f572_data["fiscal_year"] = int(periodo_match.group(1))
+        fiscal_year = int(periodo_match.group(1))
 
     # Extract Registered Dependents (Cargas de Familia: Hijos / Hijas / Cónyuge)
     seen_dependents = set()
 
     # Pattern 1: CUIL/CUIT <11 digits><Name> <DD/MM/YYYY> (standard tabular export)
     dependent_pattern_1 = re.compile(
-        r'(?:CUIL|CUIT|C\.U\.I\.T\.)\s*:?\s*(\d{11})\s*([A-Za-zÁÉÍÓÚáéíóúñÑ\s,.-]+?)\s+(\d{2}/\d{2}/\d{4})',
-        re.IGNORECASE
+        r"(?:CUIL|CUIT|C\.U\.I\.T\.)\s*:?\s*(\d{11})\s*([A-Za-zÁÉÍÓÚáéíóúñÑ\s,.-]+?)\s+(\d{2}/\d{2}/\d{4})",
+        re.IGNORECASE,
     )
 
     # Pattern 2: Fallback pattern
     dependent_pattern_2 = re.compile(
-        r'(?:HIJO|HIJA|CONYUGE|CÓNYUGE)\s*[\s\S]*?'
-        r'(?:CUIT|C\.U\.I\.T\.|CUIL)\s*:?\s*(\d{2}-?\d{8}-?\d{1})[\s\S]*?'
-        r'Nombre(?:s)?\s*:?\s*([A-Za-zÁÉÍÓÚáéíóúñÑ\s]+)',
-        re.IGNORECASE
+        r"(?:HIJO|HIJA|CONYUGE|CÓNYUGE)\s*[\s\S]*?"
+        r"(?:CUIT|C\.U\.I\.T\.|CUIL)\s*:?\s*(\d{2}-?\d{8}-?\d{1})[\s\S]*?"
+        r"Nombre(?:s)?\s*:?\s*([A-Za-zÁÉÍÓÚáéíóúñÑ\s]+)",
+        re.IGNORECASE,
     )
 
     for match in dependent_pattern_1.finditer(raw_text):
         cuit = match.group(1).replace("-", "")
         raw_name = match.group(2).strip()
-        raw_name = re.sub(r'^,\s*|\s*,$', '', raw_name).strip()
+        raw_name = re.sub(r"^,\s*|\s*,$", "", raw_name).strip()
         b_date_raw = match.group(3)
         b_parts = b_date_raw.split("/")
         birth_date_iso = f"{b_parts[2]}-{b_parts[1]}-{b_parts[0]}" if len(b_parts) == 3 else ""
@@ -101,35 +99,39 @@ def parse_f572_pdf_text(raw_text: str) -> F572Data:
                 last_name = parts[0]
                 first_name = parts[1] if len(parts) > 1 else ""
 
-            f572_data["dependents"].append(DependentModel(
-                cuit=cuit,
-                first_name=first_name,
-                last_name=last_name,
-                birth_date=birth_date_iso,
-                relationship="HIJO"
-            ))
+            dependents.append(
+                DependentModel(
+                    cuit=cuit,
+                    first_name=first_name,
+                    last_name=last_name,
+                    birth_date=birth_date_iso,
+                    relationship="HIJO",
+                )
+            )
 
-    if not f572_data["dependents"]:
+    if not dependents:
         for match in dependent_pattern_2.finditer(raw_text):
             cuit = match.group(1).replace("-", "")
             raw_name = match.group(2).strip()
-            raw_name = re.sub(r'^,\s*|\s*,$', '', raw_name).strip()
+            raw_name = re.sub(r"^,\s*|\s*,$", "", raw_name).strip()
             if cuit not in seen_dependents:
                 seen_dependents.add(cuit)
                 parts = raw_name.split(None, 1)
-                f572_data["dependents"].append(DependentModel(
-                    cuit=cuit,
-                    first_name=parts[1] if len(parts) > 1 else "",
-                    last_name=parts[0] if len(parts) > 0 else "",
-                    relationship="HIJO"
-                ))
+                dependents.append(
+                    DependentModel(
+                        cuit=cuit,
+                        first_name=parts[1] if len(parts) > 1 else "",
+                        last_name=parts[0] if len(parts) > 0 else "",
+                        relationship="HIJO",
+                    )
+                )
 
     # Regex pattern to capture invoices listed in F.572 tables:
     invoice_pattern = re.compile(
-        r'(?:CUIT|C\.U\.I\.T\.)\s*:?\s*(\d{2}-?\d{8}-?\d{1})[\s\S]*?'
-        r'(\d{4,5})\s*-\s*(\d{8})[\s\S]*?'
-        r'\$?\s*([\d.,]+)',
-        re.IGNORECASE
+        r"(?:CUIT|C\.U\.I\.T\.)\s*:?\s*(\d{2}-?\d{8}-?\d{1})[\s\S]*?"
+        r"(\d{4,5})\s*-\s*(\d{8})[\s\S]*?"
+        r"\$?\s*([\d.,]+)",
+        re.IGNORECASE,
     )
 
     for match in invoice_pattern.finditer(raw_text):
@@ -142,25 +144,34 @@ def parse_f572_pdf_text(raw_text: str) -> F572Data:
         except ValueError:
             amount = 0.0
 
-        f572_data["loaded_invoices"].append(F572LoadedInvoice(
-            vendor_cuit=cuit,
-            point_of_sale=pos,
-            receipt_number=number,
-            total_amount=amount
-        ))
+        loaded_invoices.append(
+            F572LoadedInvoice(vendor_cuit=cuit, point_of_sale=pos, receipt_number=number, total_amount=amount)
+        )
 
     # Map Spanish months to numbers
     SPANISH_MONTH_MAP = {
-        "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
-        "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12
+        "enero": 1,
+        "febrero": 2,
+        "marzo": 3,
+        "abril": 4,
+        "mayo": 5,
+        "junio": 6,
+        "julio": 7,
+        "agosto": 8,
+        "septiembre": 9,
+        "octubre": 10,
+        "noviembre": 11,
+        "diciembre": 12,
     }
 
     # Extract monthly deductions (e.g. Gastos de Educación / Servicio Doméstico)
-    months_regex = r'(?:Enero|Febrero|Marzo|Abril|Mayo|Junio|Julio|Agosto|Septiembre|Octubre|Noviembre|Diciembre)'
+    months_regex = r"(?:Enero|Febrero|Marzo|Abril|Mayo|Junio|Julio|Agosto|Septiembre|Octubre|Noviembre|Diciembre)"
     monthly_deduction_pattern = re.compile(
-        r'(\d{11})\s*-\s*(.+?)\s+([\d.,]+)Subtotal:\s*\$\n'
-        r'(' + months_regex + r')\s+([\d.,]+)\$(?:\n[^\n]+?Familiar:\s*CUIL\s*(\d{11})\s*-\s*([A-Za-zÁÉÍÓÚáéíóúñÑ\s,.-]+?)\s*-)?',
-        re.IGNORECASE
+        r"(\d{11})\s*-\s*(.+?)\s+([\d.,]+)Subtotal:\s*\$\n"
+        r"("
+        + months_regex
+        + r")\s+([\d.,]+)\$(?:\n[^\n]+?Familiar:\s*CUIL\s*(\d{11})\s*-\s*([A-Za-zÁÉÍÓÚáéíóúñÑ\s,.-]+?)\s*-)?",
+        re.IGNORECASE,
     )
 
     for match in monthly_deduction_pattern.finditer(raw_text):
@@ -175,12 +186,14 @@ def parse_f572_pdf_text(raw_text: str) -> F572Data:
 
         # Avoid duplicate entries in loaded_invoices
         is_duplicate = False
-        for existing in f572_data["loaded_invoices"]:
-            if (existing.vendor_cuit == cuit and 
-                existing.month == month_num and 
-                abs(existing.total_amount - amount) < 0.01 and
-                existing.point_of_sale is None and
-                existing.receipt_number is None):
+        for existing in loaded_invoices:
+            if (
+                existing.vendor_cuit == cuit
+                and existing.month == month_num
+                and abs(existing.total_amount - amount) < 0.01
+                and existing.point_of_sale is None
+                and existing.receipt_number is None
+            ):
                 is_duplicate = True
                 break
 
@@ -192,28 +205,31 @@ def parse_f572_pdf_text(raw_text: str) -> F572Data:
                 point_of_sale=None,
                 receipt_number=None,
                 total_amount=amount,
-                month=month_num
+                month=month_num,
             )
             if match.group(6):
                 invoice_entry.dependent_cuit = match.group(6).replace("-", "")
                 invoice_entry.dependent_name = match.group(7).strip()
 
-            f572_data["loaded_invoices"].append(invoice_entry)
+            loaded_invoices.append(invoice_entry)
 
-    return F572Data(**f572_data)
+    return F572Data(
+        taxpayer_cuit=taxpayer_cuit,
+        taxpayer_name=taxpayer_name,
+        fiscal_year=fiscal_year,
+        presentation_date=presentation_date,
+        dependents=dependents,
+        loaded_invoices=loaded_invoices,
+    )
 
 
-def sync_f572_to_env(f572_data: Union[F572Data, Dict[str, Any]], env_file_path: str = ".env") -> bool:
+def sync_f572_to_env(f572_data: F572Data | dict[str, Any], env_file_path: str = ".env") -> bool:
     """
     Safely syncs extracted F.572 values (Taxpayer CUIT, Fiscal Year, Dependents)
     into the .env configuration file without destroying existing comments or other variables.
     """
-    if isinstance(f572_data, dict):
-        data = F572Data(**f572_data)
-    else:
-        data = f572_data
-
-    updates: Dict[str, Any] = {}
+    data = F572Data(**f572_data) if isinstance(f572_data, dict) else f572_data
+    updates: dict[str, Any] = {}
 
     if data.taxpayer_cuit:
         updates["ARCA_CUIL"] = data.taxpayer_cuit
@@ -263,10 +279,7 @@ def process_vistaprevia_f572(pdf_file_path: str, sync_env: bool = True) -> F572D
     return parsed_data
 
 
-def is_invoice_already_in_f572(
-    invoice: Union[InvoiceData, Dict[str, Any]],
-    f572_data: Union[F572Data, Dict[str, Any]]
-) -> bool:
+def is_invoice_already_in_f572(invoice: InvoiceData | dict[str, Any], f572_data: F572Data | dict[str, Any]) -> bool:
     """
     Validates whether a candidate invoice (vendor_cuit, POS, receipt_number, or month/amount)
     is already present in the extracted F.572 data.
@@ -278,7 +291,7 @@ def is_invoice_already_in_f572(
         cand_amount = invoice.total_amount
         issue_date_str = invoice.issue_date
     else:
-        cand_cuit = re.sub(r'\D', '', invoice.get("vendor_cuit", ""))
+        cand_cuit = re.sub(r"\D", "", invoice.get("vendor_cuit", ""))
         cand_pos = invoice.get("point_of_sale")
         cand_num = invoice.get("receipt_number")
         cand_amount = float(invoice.get("total_amount") or 0.0)
@@ -293,10 +306,8 @@ def is_invoice_already_in_f572(
     if issue_date_str:
         parts = issue_date_str.split("-")
         if len(parts) >= 2:
-            try:
+            with contextlib.suppress(ValueError):
                 cand_month = int(parts[1])
-            except ValueError:
-                pass
 
     for item in loaded_list:
         item_cuit = item.vendor_cuit

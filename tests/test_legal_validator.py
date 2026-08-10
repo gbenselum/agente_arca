@@ -3,9 +3,10 @@ Unit tests for legal validator module across all Argentine CUIT prefixes and RG 
 """
 
 import unittest
-from src.validator.legal_validator import validate_cuit, validate_invoice_detailed, validate_invoice_legal_requirements
-from src.models.invoice import InvoiceData, ReceiptType, SiRADIGCategory
+
 from src.models.f572 import DependentModel
+from src.models.invoice import InvoiceData, ReceiptType, SiRADIGCategory
+from src.validator.legal_validator import validate_cuit, validate_invoice_detailed
 
 
 class TestLegalValidator(unittest.TestCase):
@@ -28,7 +29,7 @@ class TestLegalValidator(unittest.TestCase):
             "20123456789",  # Wrong checksum
             "30711234560",  # Wrong checksum
             "abc12345678",  # Non-numeric
-            "20123",        # Too short
+            "20123",  # Too short
         ]
         for cuit in invalid_cuits:
             self.assertFalse(validate_cuit(cuit), f"Expected invalid CUIT: {cuit}")
@@ -43,14 +44,14 @@ class TestLegalValidator(unittest.TestCase):
             issue_date="2026-05-10",
             total_amount=50000.0,
             beneficiary_cuil="20456789014",
-            suggested_category=SiRADIGCategory.GASTOS_EDUCACION
+            suggested_category=SiRADIGCategory.GASTOS_EDUCACION,
         )
         dependents = [
             DependentModel(
                 first_name="Adult",
                 last_name="Child",
                 cuit="20456789014",
-                birth_date="1998-01-01"  # Age 28 in 2026 (> 24)
+                birth_date="1998-01-01",  # Age 28 in 2026 (> 24)
             )
         ]
         res = validate_invoice_detailed(invoice, dependents, 2026)
@@ -66,15 +67,10 @@ class TestLegalValidator(unittest.TestCase):
             issue_date="2026-05-10",
             total_amount=50000.0,
             beneficiary_cuil="20123456786",  # Not in dependents
-            suggested_category=SiRADIGCategory.GASTOS_EDUCACION
+            suggested_category=SiRADIGCategory.GASTOS_EDUCACION,
         )
         dependents = [
-            DependentModel(
-                first_name="Mateo",
-                last_name="Perez",
-                cuit="20551234569",
-                birth_date="2018-04-12"
-            )
+            DependentModel(first_name="Mateo", last_name="Perez", cuit="20551234569", birth_date="2018-04-12")
         ]
         res = validate_invoice_detailed(invoice, dependents, 2026)
         self.assertFalse(res.is_valid)

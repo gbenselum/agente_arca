@@ -1,12 +1,15 @@
 import os
-from typing import List, Dict, Optional
+
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
+
 class DependentConfig:
-    def __init__(self, first_name: str, last_name: str, cuit: str, relationship: str, birth_date: str, percentage: int = 100):
+    def __init__(
+        self, first_name: str, last_name: str, cuit: str, relationship: str, birth_date: str, percentage: int = 100
+    ):
         self.first_name = first_name
         self.last_name = last_name
         self.cuit = cuit
@@ -14,15 +17,16 @@ class DependentConfig:
         self.birth_date = birth_date
         self.percentage = percentage
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "first_name": self.first_name,
             "last_name": self.last_name,
             "cuit": self.cuit,
             "relationship": self.relationship,
             "birth_date": self.birth_date,
-            "percentage": self.percentage
+            "percentage": self.percentage,
         }
+
 
 class Settings:
     def __init__(self):
@@ -31,12 +35,10 @@ class Settings:
         self.taxpayer_name: str = os.getenv("TAXPAYER_NAME", "")
         self.taxpayer_cuit: str = os.getenv("TAXPAYER_CUIT", os.getenv("ARCA_CUIL", ""))
         self.fiscal_year: int = int(os.getenv("FISCAL_YEAR", "2026"))
-        self.browser_headless: bool = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
         self.browser_slowmo_ms: int = int(os.getenv("BROWSER_SLOWMO_MS", "500"))
-        self.auto_save_draft: bool = os.getenv("AUTO_SAVE_DRAFT", "true").lower() == "true"
-        self.dependents: List[DependentConfig] = self._load_dependents()
+        self.dependents: list[DependentConfig] = self._load_dependents()
 
-    def _load_dependents(self) -> List[DependentConfig]:
+    def _load_dependents(self) -> list[DependentConfig]:
         dependents = []
         i = 1
         while True:
@@ -49,15 +51,18 @@ class Settings:
             birth_date = os.getenv(f"DEPENDENT_{i}_BIRTH_DATE", "")
             percentage = int(os.getenv(f"DEPENDENT_{i}_PERCENTAGE", "100"))
 
-            dependents.append(DependentConfig(
-                first_name=first_name,
-                last_name=last_name,
-                cuit=cuit,
-                relationship=relationship,
-                birth_date=birth_date,
-                percentage=percentage
-            ))
+            dependents.append(
+                DependentConfig(
+                    first_name=first_name,
+                    last_name=last_name,
+                    cuit=cuit,
+                    relationship=relationship,
+                    birth_date=birth_date,
+                    percentage=percentage,
+                )
+            )
             i += 1
         return dependents
+
 
 settings = Settings()

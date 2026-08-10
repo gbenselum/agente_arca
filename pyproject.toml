@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agente-arca"
+version = "0.1.0"
+description = "ARCA / AFIP SiRADIG F.572 Web automation agent: parse, validate, compute deductions and upload drafts."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "playwright>=1.40.0",
+    "pypdf>=3.0.0",
+    "pillow>=10.0.0",
+    "pytesseract>=0.3.10",
+    "PyMuPDF>=1.23.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "ruff>=0.6.0",
+    "mypy>=1.10.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["src*", "config*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+src = ["src", "config", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "SIM", "RUF"]
+# BLE001: bare except is intentional in parser/OCR fallbacks.
+# SIM102: collapsible if - kept explicit for readability.
+ignore = ["BLE001", "SIM102"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "config"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

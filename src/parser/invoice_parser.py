@@ -1,14 +1,14 @@
 """
 Invoice Parser & Extractor Module.
 Processes PDF/image invoices dropped in invoices/ directory, extracts structured tax data,
-provides OCR fallback, validates legal requirements, and writes a corresponding .json extract file with the same filename.
+provides OCR fallback, validates legal requirements, and writes a corresponding .json
+extract file with the same filename.
 """
 
-import os
 import json
 import re
-from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
+from typing import Any
 
 from ..models.invoice import InvoiceData, InvoiceParseResult, ReceiptType, SiRADIGCategory
 from ..utils.logger import logger
@@ -16,22 +16,40 @@ from ..utils.logger import logger
 try:
     from pypdf import PdfReader
 except ImportError:
-    PdfReader = None
+    PdfReader = None  # type: ignore[assignment,misc]
 
 # Optional OCR integration
 try:
     import pytesseract
     from PIL import Image
+
     OCR_AVAILABLE = True
 except ImportError:
     pytesseract = None
-    Image = None
+    Image = None  # type: ignore[assignment]
     OCR_AVAILABLE = False
+
+# Optional PDF rasterizers (PDF -> images -> OCR). Tesseract cannot read PDFs directly.
+try:
+    import pymupdf  # PyMuPDF: pure-wheel PDF rasterization (no system poppler needed)
+
+    PDF_RASTERIZER = "pymupdf"
+except ImportError:  # pragma: no cover - fallback path
+    pymupdf = None  # type: ignore[assignment]
+    try:
+        from pdf2image import convert_from_path  # Requires poppler binaries on PATH
+
+        PDF_RASTERIZER = "pdf2image"
+    except ImportError:
+        convert_from_path = None
+        PDF_RASTERIZER = None  # type: ignore[assignment]
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """Extracts raw text from a PDF file using pypdf with fallback warning."""
-    if not PdfReader:
+    if PdfReader is None:
         logger.error("pypdf is not installed. Cannot parse PDF.")
         return ""
     try:
@@ -49,19 +67,54 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         return ""
 
 
+def _rasterize_pdf_pages(pdf_path: str) -> list["Image.Image"]:
+    """Rasterizes all pages of a PDF into PIL images for OCR.
+
+    Uses PyMuPDF (preferred, no system dependencies) or pdf2image as fallback.
+    Returns an empty list if no rasterizer is available.
+    """
+    if pymupdf is not None:
+        document = pymupdf.open(pdf_path)
+        try:
+            pages: list[Image.Image] = []
+            for page in document.pages():
+                pix = page.get_pixmap(dpi=200)
+                pages.append(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
+            return pages
+        finally:
+            document.close()
+    if PDF_RASTERIZER == "pdf2image":
+        return convert_from_path(pdf_path, dpi=200)
+    return []
+
+
 def extract_text_via_ocr_fallback(pdf_path: str) -> str:
     """
     Attempts OCR extraction when text is not extractable via standard PDF text stream.
-    Gracefully logs if OCR dependencies (Tesseract) are not available.
+
+    Accepts a PDF (rasterized to images first) or a direct image file (PNG/JPG/TIFF).
+    Gracefully logs if OCR dependencies (Tesseract) or a PDF rasterizer are unavailable.
     """
     if not OCR_AVAILABLE:
         logger.info(f"OCR fallback requested for {pdf_path}, but pytesseract / Pillow is not installed.")
         return ""
+
+    source = Path(pdf_path)
     try:
-        # If an image file or PDF converted to image
-        logger.info(f"Attempting OCR on {pdf_path}...")
-        text = pytesseract.image_to_string(pdf_path, lang="spa+eng")
-        return text
+        if source.suffix.lower() in IMAGE_EXTENSIONS:
+            images: list[Image.Image] = [Image.open(source)]
+        elif source.suffix.lower() == ".pdf":
+            images = _rasterize_pdf_pages(str(source))
+            if not images:
+                logger.info(f"OCR fallback for {pdf_path}: no PDF rasterizer (pymupdf/pdf2image) available.")
+                return ""
+        else:
+            logger.warning(f"OCR fallback skipped: unsupported file type '{source.suffix}' for {pdf_path}.")
+            return ""
+
+        logger.info(f"Attempting OCR on {pdf_path} ({len(images)} image(s))...")
+        texts = [pytesseract.image_to_string(img, lang="spa+eng") for img in images]
+        return "\n".join(t for t in texts if t.strip())
     except Exception as e:
         logger.warning(f"OCR fallback failed on {pdf_path}: {e}")
         return ""
@@ -70,15 +123,70 @@ def extract_text_via_ocr_fallback(pdf_path: str) -> str:
 def detect_suggested_category(text: str) -> SiRADIGCategory:
     """Detects likely SiRADIG deduction category from receipt keywords."""
     clean = text.lower()
-    if any(k in clean for k in ["colegio", "escuela", "instituto", "educacion", "educación", "arancel", "matricula", "matrícula", "universidad", "cuota escolar", "uniforme"]):
+    if any(
+        k in clean
+        for k in [
+            "colegio",
+            "escuela",
+            "instituto",
+            "educacion",
+            "educación",
+            "arancel",
+            "matricula",
+            "matrícula",
+            "universidad",
+            "cuota escolar",
+            "uniforme",
+        ]
+    ):
         return SiRADIGCategory.GASTOS_EDUCACION
-    elif any(k in clean for k in ["prepaga", "swiss medical", "osde", "galeno", "medife", "omint", "plan de salud", "cuota asistencial", "asistencia medica"]):
+    elif any(
+        k in clean
+        for k in [
+            "prepaga",
+            "swiss medical",
+            "osde",
+            "galeno",
+            "medife",
+            "omint",
+            "plan de salud",
+            "cuota asistencial",
+            "asistencia medica",
+        ]
+    ):
         return SiRADIGCategory.CUOTA_MEDICO_ASSIST
-    elif any(k in clean for k in ["medico", "médico", "honorarios", "odontologo", "odontólogo", "psicologo", "psicólogo", "consulta", "clinica", "clínica", "laboratorio", "radiografia", "kinesiologia"]):
+    elif any(
+        k in clean
+        for k in [
+            "medico",
+            "médico",
+            "honorarios",
+            "odontologo",
+            "odontólogo",
+            "psicologo",
+            "psicólogo",
+            "consulta",
+            "clinica",
+            "clínica",
+            "laboratorio",
+            "radiografia",
+            "kinesiologia",
+        ]
+    ):
         return SiRADIGCategory.MEDICO_PARAMEDICO
     elif any(k in clean for k in ["alquiler", "locacion", "locación", "inmobiliaria", "arrendamiento"]):
         return SiRADIGCategory.ALQUILER_HABITACION
-    elif any(k in clean for k in ["servicio domestico", "servicio doméstico", "casas particulares", "personal de casas particulares", "vep", "afip f. 102"]):
+    elif any(
+        k in clean
+        for k in [
+            "servicio domestico",
+            "servicio doméstico",
+            "casas particulares",
+            "personal de casas particulares",
+            "vep",
+            "afip f. 102",
+        ]
+    ):
         return SiRADIGCategory.CASAS_PARTICULARES
     elif any(k in clean for k in ["seguro de vida", "seguro de retiro", "poliza de vida", "póliza"]):
         return SiRADIGCategory.SEGUROS_VIDA_RETIRO
@@ -86,18 +194,23 @@ def detect_suggested_category(text: str) -> SiRADIGCategory:
         return SiRADIGCategory.GASTOS_SEPELIO
     elif any(k in clean for k in ["donacion", "donación", "fundacion", "fundación", "asociacion civil"]):
         return SiRADIGCategory.DONACIONES
-    elif any(k in clean for k in ["interes hipotecario", "intereses hipotecarios", "credito hipotecario", "préstamo hipotecario"]):
+    elif any(
+        k in clean
+        for k in ["interes hipotecario", "intereses hipotecarios", "credito hipotecario", "préstamo hipotecario"]
+    ):
         return SiRADIGCategory.INTERES_HIPOTECARIO
 
-    return SiRADIGCategory.GASTOS_EDUCACION
+    # No keyword matched: explicit UNKNOWN sentinel (NOT education) so callers can
+    # flag the invoice for manual categorization before computing/uploading.
+    return SiRADIGCategory.UNKNOWN
 
 
-def parse_invoice_text(raw_text: str, filename: Optional[str] = None) -> InvoiceData:
+def parse_invoice_text(raw_text: str, filename: str | None = None) -> InvoiceData:
     """
     Parses raw text extracted from invoice into structured InvoiceData model.
     Applies comprehensive regex heuristics for AFIP electronic invoices.
     """
-    extracted = {
+    extracted: dict[str, Any] = {
         "vendor_cuit": "",
         "vendor_name": "",
         "receipt_type": ReceiptType.FACTURA_B,
@@ -110,7 +223,7 @@ def parse_invoice_text(raw_text: str, filename: Optional[str] = None) -> Invoice
         "cae_due_date": "",
         "concept_description": "",
         "beneficiary_cuil": "",
-        "suggested_category": SiRADIGCategory.GASTOS_EDUCACION
+        "suggested_category": SiRADIGCategory.UNKNOWN,
     }
 
     # Default receipt type
@@ -118,7 +231,7 @@ def parse_invoice_text(raw_text: str, filename: Optional[str] = None) -> Invoice
 
     # Try to extract receipt type from AFIP-style filename
     if filename:
-        file_match = re.match(r'^fa_(\d{11})(\d{2})', filename, re.IGNORECASE)
+        file_match = re.match(r"^fa_(\d{11})(\d{2})", filename, re.IGNORECASE)
         if file_match:
             type_code = file_match.group(2)
             code_map = {
@@ -140,64 +253,72 @@ def parse_invoice_text(raw_text: str, filename: Optional[str] = None) -> Invoice
     text_clean = raw_text.replace("\n", " ")
 
     # Check for specific AFIP receipt headers
-    if re.search(r'\bFACTURA\s+A\b', text_clean, re.IGNORECASE):
+    if re.search(r"\bFACTURA\s+A\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.FACTURA_A
-    elif re.search(r'\bFACTURA\s+B\b', text_clean, re.IGNORECASE):
+    elif re.search(r"\bFACTURA\s+B\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.FACTURA_B
-    elif re.search(r'\bFACTURA\s+C\b', text_clean, re.IGNORECASE):
+    elif re.search(r"\bFACTURA\s+C\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.FACTURA_C
-    elif re.search(r'\bFACTURA\s+M\b', text_clean, re.IGNORECASE):
+    elif re.search(r"\bFACTURA\s+M\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.FACTURA_M
-    elif re.search(r'\bRECIBO\s+B\b', text_clean, re.IGNORECASE):
+    elif re.search(r"\bRECIBO\s+B\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.RECIBO_B
-    elif re.search(r'\bRECIBO\s+C\b', text_clean, re.IGNORECASE):
+    elif re.search(r"\bRECIBO\s+C\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.RECIBO_C
-    elif re.search(r'\bNOTA\s+DE\s+DEBITO\s+A\b', text_clean, re.IGNORECASE):
+    elif re.search(r"\bNOTA\s+DE\s+DEBITO\s+A\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.NOTA_DE_DEBITO_A
-    elif re.search(r'\bNOTA\s+DE\s+DEBITO\s+B\b', text_clean, re.IGNORECASE):
+    elif re.search(r"\bNOTA\s+DE\s+DEBITO\s+B\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.NOTA_DE_DEBITO_B
-    elif re.search(r'\bNOTA\s+DE\s+DEBITO\s+C\b', text_clean, re.IGNORECASE):
+    elif re.search(r"\bNOTA\s+DE\s+DEBITO\s+C\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.NOTA_DE_DEBITO_C
-    elif re.search(r'\bNOTA\s+DE\s+CREDITO\s+A\b', text_clean, re.IGNORECASE):
+    elif re.search(r"\bNOTA\s+DE\s+CREDITO\s+A\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.NOTA_DE_CREDITO_A
-    elif re.search(r'\bNOTA\s+DE\s+CREDITO\s+B\b', text_clean, re.IGNORECASE):
+    elif re.search(r"\bNOTA\s+DE\s+CREDITO\s+B\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.NOTA_DE_CREDITO_B
-    elif re.search(r'\bNOTA\s+DE\s+CREDITO\s+C\b', text_clean, re.IGNORECASE):
+    elif re.search(r"\bNOTA\s+DE\s+CREDITO\s+C\b", text_clean, re.IGNORECASE):
         receipt_type = ReceiptType.NOTA_DE_CREDITO_C
 
     extracted["receipt_type"] = receipt_type
 
     # 1. Vendor CUIT regex pattern
-    cuit_match = re.search(r'(?:CUIT|C\.U\.I\.T\.)\s*:?\s*(\d{2}-?\d{8}-?\d{1})', raw_text, re.IGNORECASE)
+    cuit_match = re.search(r"(?:CUIT|C\.U\.I\.T\.)\s*:?\s*(\d{2}-?\d{8}-?\d{1})", raw_text, re.IGNORECASE)
     if cuit_match:
         extracted["vendor_cuit"] = cuit_match.group(1).replace("-", "")
     elif filename:
-        file_match = re.match(r'^fa_(\d{11})', filename, re.IGNORECASE)
+        file_match = re.match(r"^fa_(\d{11})", filename, re.IGNORECASE)
         if file_match:
             extracted["vendor_cuit"] = file_match.group(1)
 
     # Vendor Name / Razon Social
-    name_match = re.search(r'(?:Razón Social|Razon Social|Razón Social / Denominación|Apellido y Nombre|Emisor)\s*:?\s*([^\n\r]+)', raw_text, re.IGNORECASE)
+    name_match = re.search(
+        r"(?:Razón Social|Razon Social|Razón Social / Denominación|Apellido y Nombre|Emisor)\s*:?\s*([^\n\r]+)",
+        raw_text,
+        re.IGNORECASE,
+    )
     if name_match:
         extracted["vendor_name"] = name_match.group(1).strip()
 
     # 2. Receipt Number & POS (0000X-000XXXXX or Punto de Venta: X Comp. Nro: Y)
-    pos_comp_match = re.search(r'Punto de Venta\s*:?\s*(\d{1,5})\s+Comp\.?\s*Nro\s*:?\s*(\d{1,8})', raw_text, re.IGNORECASE)
+    pos_comp_match = re.search(
+        r"Punto de Venta\s*:?\s*(\d{1,5})\s+Comp\.?\s*Nro\s*:?\s*(\d{1,8})", raw_text, re.IGNORECASE
+    )
     if pos_comp_match:
         extracted["point_of_sale"] = int(pos_comp_match.group(1))
         extracted["receipt_number"] = int(pos_comp_match.group(2))
     else:
-        nro_match = re.search(r'(\d{4,5})\s*-\s*(\d{8})', raw_text)
+        nro_match = re.search(r"(\d{4,5})\s*-\s*(\d{8})", raw_text)
         if nro_match:
             extracted["point_of_sale"] = int(nro_match.group(1))
             extracted["receipt_number"] = int(nro_match.group(2))
 
     # 3. Issue Date (DD/MM/YYYY or YYYY-MM-DD or Fecha de Emisión: DD/MM/YYYY)
-    date_match = re.search(r'(?:Fecha(?:\s+de\s+Emisi[oó]n)?\s*:?\s*)(\d{2})[/.-](\d{2})[/.-](\d{4})', raw_text, re.IGNORECASE)
+    date_match = re.search(
+        r"(?:Fecha(?:\s+de\s+Emisi[oó]n)?\s*:?\s*)(\d{2})[/.-](\d{2})[/.-](\d{4})", raw_text, re.IGNORECASE
+    )
     if date_match:
         extracted["issue_date"] = f"{date_match.group(3)}-{date_match.group(2)}-{date_match.group(1)}"
     else:
-        fallback_date = re.search(r'(\d{2})[/.-](\d{2})[/.-](\d{4})', raw_text)
+        fallback_date = re.search(r"(\d{2})[/.-](\d{2})[/.-](\d{4})", raw_text)
         if fallback_date:
             extracted["issue_date"] = f"{fallback_date.group(3)}-{fallback_date.group(2)}-{fallback_date.group(1)}"
 
@@ -218,24 +339,42 @@ def parse_invoice_text(raw_text: str, filename: Optional[str] = None) -> Invoice
         except ValueError:
             return 0.0
 
-    amount_match = re.search(r'(?:Importe\s+Total|TOTAL(?:\s+A\s+PAGAR)?|NETO|TOTAL\s*FACTURA\s*:)\s*:?\s*\$?\s*([\d.,]+)', raw_text, re.IGNORECASE)
+    amount_match = re.search(
+        r"(?:Importe\s+Total|TOTAL(?:\s+A\s+PAGAR)?|NETO|TOTAL\s*FACTURA\s*:)\s*:?\s*\$?\s*([\d.,]+)",
+        raw_text,
+        re.IGNORECASE,
+    )
     if amount_match:
         extracted["total_amount"] = parse_amount(amount_match.group(1))
 
     # 5. CAE Match (14 digits)
-    cae_match = re.search(r'(?:CAE|C\.A\.E\.|CAEA|C\.A\.E\.A\.)\s*(?:N[°ºo\.]?)?\s*:?\s*(\d{14})', raw_text, re.IGNORECASE)
+    cae_match = re.search(
+        r"(?:CAE|C\.A\.E\.|CAEA|C\.A\.E\.A\.)\s*(?:N[°ºo\.]?)?\s*:?\s*(\d{14})", raw_text, re.IGNORECASE
+    )
     if cae_match:
         extracted["cae"] = cae_match.group(1)
 
     # 6. CAE Due Date Match
-    cae_due_date_match = re.search(r'(?:Fecha\s+de\s+Vto\.?(?:\s+de)?|VENCIMIENTO(?:\s+DEL)?|VTO\.?(?:\s+DEL)?)\s+CAE\s*:?\s*(\d{2})[/.-](\d{2})[/.-](\d{4})', raw_text, re.IGNORECASE)
+    cae_due_date_match = re.search(
+        r"(?:Fecha\s+de\s+Vto\.?(?:\s+de)?|VENCIMIENTO(?:\s+DEL)?|VTO\.?(?:\s+DEL)?)\s+CAE\s*:?\s*(\d{2})[/.-](\d{2})[/.-](\d{4})",
+        raw_text,
+        re.IGNORECASE,
+    )
     if not cae_due_date_match:
-        cae_due_date_match = re.search(r'(?:VTO|VENCIMIENTO)\s*:?\s*(\d{2})[/.-](\d{2})[/.-](\d{4})', raw_text, re.IGNORECASE)
+        cae_due_date_match = re.search(
+            r"(?:VTO|VENCIMIENTO)\s*:?\s*(\d{2})[/.-](\d{2})[/.-](\d{4})", raw_text, re.IGNORECASE
+        )
     if cae_due_date_match:
-        extracted["cae_due_date"] = f"{cae_due_date_match.group(3)}-{cae_due_date_match.group(2)}-{cae_due_date_match.group(1)}"
+        extracted["cae_due_date"] = (
+            f"{cae_due_date_match.group(3)}-{cae_due_date_match.group(2)}-{cae_due_date_match.group(1)}"
+        )
 
     # 7. Beneficiary / Client CUIT / DNI
-    client_cuit_match = re.search(r'(?:CUIT|CUIL|Documento|Doc)\s*(?:del\s+Comprador|Receptor|Cliente)?\s*:?\s*(\d{2}-?\d{8}-?\d{1})', raw_text, re.IGNORECASE)
+    client_cuit_match = re.search(
+        r"(?:CUIT|CUIL|Documento|Doc)\s*(?:del\s+Comprador|Receptor|Cliente)?\s*:?\s*(\d{2}-?\d{8}-?\d{1})",
+        raw_text,
+        re.IGNORECASE,
+    )
     if client_cuit_match:
         extracted["beneficiary_cuil"] = client_cuit_match.group(1).replace("-", "")
 
@@ -243,7 +382,7 @@ def parse_invoice_text(raw_text: str, filename: Optional[str] = None) -> Invoice
     extracted["suggested_category"] = detect_suggested_category(raw_text)
 
     # Extract concept / description snippet
-    concept_match = re.search(r'(?:Concepto|Descripción|Detalle)\s*:?\s*([^\n\r]{5,100})', raw_text, re.IGNORECASE)
+    concept_match = re.search(r"(?:Concepto|Descripción|Detalle)\s*:?\s*([^\n\r]{5,100})", raw_text, re.IGNORECASE)
     if concept_match:
         extracted["concept_description"] = concept_match.group(1).strip()
     else:
@@ -261,11 +400,7 @@ def process_pdf_invoice(pdf_file_path: str) -> InvoiceParseResult:
     pdf_path = Path(pdf_file_path)
     if not pdf_path.exists():
         logger.error(f"PDF file not found: {pdf_file_path}")
-        return InvoiceParseResult(
-            success=False,
-            file_path=pdf_file_path,
-            errors=[f"File not found: {pdf_file_path}"]
-        )
+        return InvoiceParseResult(success=False, file_path=pdf_file_path, errors=[f"File not found: {pdf_file_path}"])
 
     raw_text = extract_text_from_pdf(str(pdf_path))
     method = "pypdf"
@@ -306,5 +441,5 @@ def process_pdf_invoice(pdf_file_path: str) -> InvoiceParseResult:
         invoice=parsed_data,
         raw_text=raw_text,
         warnings=warnings,
-        file_path=str(pdf_path)
+        file_path=str(pdf_path),
     )

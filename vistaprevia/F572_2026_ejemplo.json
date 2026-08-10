@@ -1,11 +1,11 @@
 {
-  "taxpayer_cuit": "20123456789",
+  "taxpayer_cuit": "20780009188",
   "fiscal_year": 2026,
   "presentation_date": "2026-03-01",
   "source_pdf": "F572_2026_ejemplo.pdf",
   "loaded_invoices": [
     {
-      "vendor_cuit": "30711234567",
+      "vendor_cuit": "30117368544",
       "point_of_sale": 5,
       "receipt_number": 12890,
       "total_amount": 85000.0,

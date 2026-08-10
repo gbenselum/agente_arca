@@ -1,6 +1,6 @@
 {
   "invoice_id": "INV-2026-MED-002",
-  "vendor_cuit": "30654321098",
+  "vendor_cuit": "30200798909",
   "vendor_name": "Centro Medico Integral S.R.L.",
   "receipt_type": "FACTURA_B",
   "point_of_sale": 2,
@@ -11,6 +11,9 @@
   "cae": "74987654321098",
   "cae_due_date": "2026-03-25",
   "concept_description": "Consulta Fonoaudiologia y Kinesiologia - Beneficiario: Lucia Perez",
-  "beneficiary_cuil": "27589876543",
-  "suggested_category": "MEDICO_PARAMEDICO"
+  "beneficiary_cuil": "27042489943",
+  "suggested_category": "MEDICO_PARAMEDICO",
+  "source_pdf": "factura_medica.pdf",
+  "extraction_method": "manual",
+  "extraction_confidence": 1.0
 }

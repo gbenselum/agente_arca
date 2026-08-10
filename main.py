@@ -10,22 +10,21 @@ Coordinates the end-to-end tax deduction pipeline:
 """
 
 import argparse
-import sys
-import os
 import json
+import os
+import sys
 from pathlib import Path
-from typing import List
 
 # Add workspace to path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from config.settings import settings
-from src.parser.f572_parser import process_vistaprevia_f572, is_invoice_already_in_f572
-from src.parser.invoice_parser import process_pdf_invoice
-from src.validator.legal_validator import validate_invoice_detailed
-from src.engine.deduction_calculator import compute_deduction, compute_batch_deductions, generate_siradig_payload
 from src.browser.siradig_automator import SiRADIGAutomator
+from src.engine.deduction_calculator import compute_batch_deductions
+from src.parser.f572_parser import is_invoice_already_in_f572, process_vistaprevia_f572
+from src.parser.invoice_parser import process_pdf_invoice
 from src.utils.logger import logger, setup_logging
+from src.validator.legal_validator import validate_invoice_detailed
 
 
 def cmd_sync_f572(args) -> int:
@@ -59,20 +58,27 @@ def cmd_parse_invoices(args) -> int:
     for pdf_file in pdf_files:
         res = process_pdf_invoice(str(pdf_file))
         if res.success and res.invoice:
-            print(f"[EXTRACTED] {pdf_file.name} -> {res.invoice.receipt_type.value} | Total: ${res.invoice.total_amount:,.2f} | CUIT: {res.invoice.vendor_cuit}")
+            print(
+                f"[EXTRACTED] {pdf_file.name} -> {res.invoice.receipt_type.value} "
+                f"| Total: ${res.invoice.total_amount:,.2f} | CUIT: {res.invoice.vendor_cuit}"
+            )
         else:
             print(f"[FAILED/WARNING] {pdf_file.name} -> Errors: {res.errors}")
     return 0
 
 
-def cmd_validate_and_compute(args) -> int:
-    """Validates candidate invoices, checks duplicates against F.572, and computes annual caps."""
-    # 1. Load F.572 if available
+def collect_validated_invoices(args, verbose: bool = True) -> list[dict]:
+    """Loads candidate invoice JSONs from invoices/, filters out duplicates already loaded
+    in the F.572 export and invoices failing legal validation.
+
+    Prints the validation / duplicate report (unless ``verbose=False``) and returns the eligible subset.
+    """
+    # 1. Load F.572 export if available
     vp_dir = Path(args.vistaprevia_dir)
     f572_jsons = list(vp_dir.glob("*.json"))
     f572_data = None
     if f572_jsons:
-        with open(f572_jsons[0], "r", encoding="utf-8") as f:
+        with open(f572_jsons[0], encoding="utf-8") as f:
             f572_data = json.load(f)
 
     # 2. Load candidate invoices
@@ -87,33 +93,47 @@ def cmd_validate_and_compute(args) -> int:
     dependents = [d.to_dict() for d in settings.dependents]
 
     valid_invoices = []
-    print("\n" + "=" * 80)
-    print(f"TAX VALIDATION & DUPLICATE REPORT - FISCAL YEAR {fiscal_year}")
-    print("=" * 80)
+    if verbose:
+        print("\n" + "=" * 80)
+        print(f"TAX VALIDATION & DUPLICATE REPORT - FISCAL YEAR {fiscal_year}")
+        print("=" * 80)
 
     for inv_json_path in inv_jsons:
-        with open(inv_json_path, "r", encoding="utf-8") as f:
+        with open(inv_json_path, encoding="utf-8") as f:
             inv_dict = json.load(f)
 
         # Check duplicate
         if f572_data and is_invoice_already_in_f572(inv_dict, f572_data):
-            print(f"[DUPLICATE / SKIP] {inv_json_path.name} is already registered in F.572 export.")
+            if verbose:
+                print(f"[DUPLICATE / SKIP] {inv_json_path.name} is already registered in F.572 export.")
             continue
 
         # Check legal requirements
         val_res = validate_invoice_detailed(inv_dict, dependents, fiscal_year)
         if not val_res.is_valid:
-            print(f"[LEGAL ERROR] {inv_json_path.name} failed validation: {val_res.errors}")
+            if verbose:
+                print(f"[LEGAL ERROR] {inv_json_path.name} failed validation: {val_res.errors}")
             continue
 
         valid_invoices.append(inv_dict)
-        print(f"[VALID] {inv_json_path.name} | CUIT: {inv_dict.get('vendor_cuit')} | Amount: ${inv_dict.get('total_amount', 0):,.2f}")
+        if verbose:
+            print(
+                f"[VALID] {inv_json_path.name} | CUIT: {inv_dict.get('vendor_cuit')} "
+                f"| Amount: ${inv_dict.get('total_amount', 0):,.2f}"
+            )
 
+    return valid_invoices
+
+
+def cmd_validate_and_compute(args) -> int:
+    """Validates candidate invoices, checks duplicates against F.572, and computes annual caps."""
+    valid_invoices = collect_validated_invoices(args)
     if not valid_invoices:
         print("\nNo eligible new invoices to compute.")
         return 0
 
-    # 3. Compute Deductions & Annual Caps
+    # Compute Deductions & Annual Caps
+    fiscal_year = args.fiscal_year or settings.fiscal_year
     summary = compute_batch_deductions(valid_invoices, fiscal_year=fiscal_year)
     print("\n" + "=" * 80)
     print("RG 4003/17 DEDUCTION ENGINE SUMMARY")
@@ -137,6 +157,32 @@ def cmd_validate_and_compute(args) -> int:
     return 0
 
 
+def cmd_upload_draft(args) -> int:
+    """Uploads validated, non-duplicate deductions to SiRADIG in DRAFT mode only.
+
+    Single-step command: reuses previously extracted invoice JSONs and the F.572
+    export (if present) to select the eligible subset, then launches the browser.
+    """
+    print("\n>>> Launching SiRADIG Playwright Automator (DRAFT MODE ONLY)...")
+    # Reuse the validated, non-duplicate subset ONLY — never upload raw/unfiltered JSONs.
+    valid_invoices = collect_validated_invoices(args)
+    if not valid_invoices:
+        print("\n[WARNING] No validated invoices to upload. Skipping browser upload.")
+        return 0
+
+    automator = SiRADIGAutomator(
+        cuil=settings.arca_cuil,
+        clave_fiscal=settings.arca_clave_fiscal,
+        headless=args.headless,
+        slow_mo=settings.browser_slowmo_ms,
+    )
+    res = automator.run_draft_upload(fiscal_year=args.fiscal_year or settings.fiscal_year, deductions=valid_invoices)
+    print(f"\n[UPLOAD RESULT] Success: {res.success} | Saved Items: {res.saved_count}/{res.processed_count}")
+    if res.error:
+        print(f"[ERROR] {res.error}")
+    return 0
+
+
 def cmd_pipeline(args) -> int:
     """Executes the complete end-to-end pipeline."""
     print("\n>>> STEP 1: Syncing F.572 Vista Previa export...")
@@ -149,24 +195,8 @@ def cmd_pipeline(args) -> int:
     cmd_validate_and_compute(args)
 
     if args.upload_draft:
-        print("\n>>> STEP 4: Launching SiRADIG Playwright Automator (DRAFT MODE ONLY)...")
-        inv_dir = Path(args.invoices_dir)
-        inv_jsons = list(inv_dir.glob("*.json"))
-        invoices = []
-        for p in inv_jsons:
-            with open(p, "r", encoding="utf-8") as f:
-                invoices.append(json.load(f))
-
-        automator = SiRADIGAutomator(
-            cuil=settings.arca_cuil,
-            clave_fiscal=settings.arca_clave_fiscal,
-            headless=args.headless,
-            slow_mo=settings.browser_slowmo_ms
-        )
-        res = automator.run_draft_upload(fiscal_year=args.fiscal_year or settings.fiscal_year, deductions=invoices)
-        print(f"\n[UPLOAD RESULT] Success: {res.success} | Saved Items: {res.saved_count}/{res.processed_count}")
-        if res.error:
-            print(f"[ERROR] {res.error}")
+        print("\n>>> STEP 4: Uploading validated deductions as drafts...")
+        return cmd_upload_draft(args)
 
     return 0
 
@@ -192,7 +222,9 @@ def main():
     val_p.add_argument("--output-json", help="Optional path to write calculation summary JSON")
 
     # upload-draft
-    upload_p = subparsers.add_parser("upload-draft", help="Upload valid deductions to SiRADIG in DRAFT mode")
+    upload_p = subparsers.add_parser(
+        "upload-draft", help="Upload validated, non-duplicate deductions to SiRADIG in DRAFT mode (single step)"
+    )
     upload_p.add_argument("--headless", action="store_true", help="Run browser in headless mode")
 
     # pipeline
@@ -213,8 +245,7 @@ def main():
     elif args.command == "validate":
         return cmd_validate_and_compute(args)
     elif args.command == "upload-draft":
-        args.upload_draft = True
-        return cmd_pipeline(args)
+        return cmd_upload_draft(args)
     else:
         parser.print_help()
         return 1

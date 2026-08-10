@@ -1,24 +1,22 @@
 """
 Playwright Browser Automator for ARCA / AFIP SiRADIG - Formulario 572 Web.
-Fills deductions across categories, captures verification screenshots, and saves them strictly as DRAFT (Guardar Borrador).
+Fills deductions across categories, captures verification screenshots, and saves
+them strictly as DRAFT (Guardar Borrador).
 """
 
 import time
-import os
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Union
+from typing import Any
 
-from ..models.automator import AutomatorItemResult, AutomatorBatchResult
-from ..models.invoice import InvoiceData, ReceiptType, SiRADIGCategory
+from ..models.automator import AutomatorBatchResult, AutomatorItemResult
+from ..models.invoice import InvoiceData, SiRADIGCategory
 from ..utils.logger import logger
 
 try:
-    from playwright.sync_api import sync_playwright, Page, BrowserContext, TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
 except ImportError:
-    sync_playwright = None
-    Page = None
-    BrowserContext = None
-    PlaywrightTimeoutError = Exception
+    sync_playwright = None  # type: ignore[assignment]
 
 
 class SiRADIGAutomator:
@@ -28,7 +26,7 @@ class SiRADIGAutomator:
         clave_fiscal: str,
         headless: bool = False,
         slow_mo: int = 500,
-        screenshots_dir: str = "screenshots"
+        screenshots_dir: str = "screenshots",
     ):
         self.cuil = cuil.replace("-", "")
         self.clave_fiscal = clave_fiscal
@@ -50,7 +48,7 @@ class SiRADIGAutomator:
             logger.warning(f"Could not take screenshot for {step_name}: {e}")
             return ""
 
-    def _fill_medical_expense(self, page: Any, item: Dict[str, Any]) -> None:
+    def _fill_medical_expense(self, page: Any, item: dict[str, Any]) -> None:
         """Navigates and fills Gastos Médicos y Paramédicos."""
         logger.info(f"Filling Medical expense: {item.get('vendor_cuit')}")
         # Click category menu entry
@@ -80,7 +78,7 @@ class SiRADIGAutomator:
         if item.get("beneficiary_cuil"):
             page.select_option("select#cuitBeneficiario", item["beneficiary_cuil"])
 
-    def _fill_education_expense(self, page: Any, item: Dict[str, Any]) -> None:
+    def _fill_education_expense(self, page: Any, item: dict[str, Any]) -> None:
         """Navigates and fills Gastos de Educación."""
         logger.info(f"Filling Education expense: {item.get('vendor_cuit')}")
         page.click("text=Gastos de Educación", timeout=5000)
@@ -109,7 +107,7 @@ class SiRADIGAutomator:
         if item.get("beneficiary_cuil"):
             page.select_option("select#cuitFamiliar", item["beneficiary_cuil"])
 
-    def _fill_rental_expense(self, page: Any, item: Dict[str, Any]) -> None:
+    def _fill_rental_expense(self, page: Any, item: dict[str, Any]) -> None:
         """Navigates and fills Alquiler de Casa Habitación."""
         logger.info(f"Filling Rental expense: {item.get('vendor_cuit')}")
         page.click("text=Alquiler de inmuebles destinados a casa habitación", timeout=5000)
@@ -124,7 +122,7 @@ class SiRADIGAutomator:
             page.fill("input#fechaEmision", item["issue_date"])
         page.fill("input#montoTotal", f"{float(item.get('total_amount', 0.0)):.2f}")
 
-    def _fill_domestic_service(self, page: Any, item: Dict[str, Any]) -> None:
+    def _fill_domestic_service(self, page: Any, item: dict[str, Any]) -> None:
         """Navigates and fills Casas Particulares / Servicio Doméstico."""
         logger.info(f"Filling Domestic Service expense: {item.get('vendor_cuit')}")
         page.click("text=Personal de Casas Particulares", timeout=5000)
@@ -134,31 +132,31 @@ class SiRADIGAutomator:
         page.fill("input#montoAportes", f"{float(item.get('total_amount', 0.0)):.2f}")
 
     def run_draft_upload(
-        self,
-        fiscal_year: int,
-        deductions: List[Union[InvoiceData, Dict[str, Any]]]
+        self, fiscal_year: int, deductions: Sequence[InvoiceData | dict[str, Any]]
     ) -> AutomatorBatchResult:
         """
         Launches browser, logs in to ARCA portal, opens SiRADIG Trabajador,
         loads each deduction category, and strictly saves as draft (Guardar Borrador).
         """
         start_time = time.time()
-        if not sync_playwright:
+        if sync_playwright is None:
             return AutomatorBatchResult(
                 success=False,
                 fiscal_year=fiscal_year,
-                error="Playwright is not installed. Please run `pip install playwright && playwright install chromium`."
+                error=(
+                    "Playwright is not installed. Please run `pip install playwright && playwright install chromium`."
+                ),
             )
 
         if not self.cuil or not self.clave_fiscal:
             return AutomatorBatchResult(
                 success=False,
                 fiscal_year=fiscal_year,
-                error="Missing CUIL or Clave Fiscal credentials in environment (.env)."
+                error="Missing CUIL or Clave Fiscal credentials in environment (.env).",
             )
 
-        processed_items: List[AutomatorItemResult] = []
-        session_screenshots: List[str] = []
+        processed_items: list[AutomatorItemResult] = []
+        session_screenshots: list[str] = []
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless, slow_mo=self.slow_mo)
@@ -202,7 +200,9 @@ class SiRADIGAutomator:
                 # Step 5: Process each deduction entry
                 for item in deductions:
                     item_dict = item.model_dump() if isinstance(item, InvoiceData) else dict(item)
-                    category = item_dict.get("suggested_category") or item_dict.get("siradig_code") or "GASTOS_EDUCACION"
+                    category = item_dict.get("suggested_category") or item_dict.get("siradig_code")
+                    if category is None:
+                        category = SiRADIGCategory.UNKNOWN.value
                     if isinstance(category, SiRADIGCategory):
                         category = category.value
 
@@ -210,6 +210,27 @@ class SiRADIGAutomator:
                     pos = item_dict.get("point_of_sale")
                     num = item_dict.get("receipt_number")
                     inv_id = f"{cuit}-{pos or 0:04d}-{num or 0:08d}"
+
+                    # UNKNOWN is not a real SiRADIG code: reject rather than silently file as education.
+                    if category == SiRADIGCategory.UNKNOWN.value:
+                        skip_msg = f"Skipping {inv_id}: suggested category is UNKNOWN (requires manual categorization)."
+                        logger.warning(skip_msg)
+                        processed_items.append(
+                            AutomatorItemResult(
+                                siradig_code=category,
+                                invoice_id=inv_id,
+                                status="FAILED",
+                                category_name=category,
+                                point_of_sale=pos,
+                                receipt_number=num,
+                                amount=float(item_dict.get("total_amount", 0.0)),
+                                error=(
+                                    "Category is UNKNOWN (not auto-detectable). "
+                                    "Set suggested_category manually before uploading."
+                                ),
+                            )
+                        )
+                        continue
 
                     logger.info(f"Processing deduction {inv_id} for category {category}")
 
@@ -232,16 +253,18 @@ class SiRADIGAutomator:
                         shot = self._take_screenshot(siradig_page, f"draft_saved_{inv_id}")
                         session_screenshots.append(shot)
 
-                        processed_items.append(AutomatorItemResult(
-                            siradig_code=category,
-                            invoice_id=inv_id,
-                            status="DRAFT_SAVED",
-                            category_name=category,
-                            point_of_sale=pos,
-                            receipt_number=num,
-                            amount=float(item_dict.get("total_amount", 0.0)),
-                            screenshot_path=shot
-                        ))
+                        processed_items.append(
+                            AutomatorItemResult(
+                                siradig_code=category,
+                                invoice_id=inv_id,
+                                status="DRAFT_SAVED",
+                                category_name=category,
+                                point_of_sale=pos,
+                                receipt_number=num,
+                                amount=float(item_dict.get("total_amount", 0.0)),
+                                screenshot_path=shot,
+                            )
+                        )
 
                         # Return to Deductions menu for next item
                         siradig_page.click("text=Deducciones y desgravaciones", timeout=5000)
@@ -250,17 +273,19 @@ class SiRADIGAutomator:
                     except Exception as item_error:
                         logger.error(f"Error loading item {inv_id}: {item_error}")
                         err_shot = self._take_screenshot(siradig_page, f"error_{inv_id}")
-                        processed_items.append(AutomatorItemResult(
-                            siradig_code=category,
-                            invoice_id=inv_id,
-                            status="FAILED",
-                            category_name=category,
-                            point_of_sale=pos,
-                            receipt_number=num,
-                            amount=float(item_dict.get("total_amount", 0.0)),
-                            screenshot_path=err_shot,
-                            error=str(item_error)
-                        ))
+                        processed_items.append(
+                            AutomatorItemResult(
+                                siradig_code=category,
+                                invoice_id=inv_id,
+                                status="FAILED",
+                                category_name=category,
+                                point_of_sale=pos,
+                                receipt_number=num,
+                                amount=float(item_dict.get("total_amount", 0.0)),
+                                screenshot_path=err_shot,
+                                error=str(item_error),
+                            )
+                        )
 
                 elapsed = time.time() - start_time
                 saved_count = sum(1 for i in processed_items if i.status == "DRAFT_SAVED")
@@ -275,7 +300,7 @@ class SiRADIGAutomator:
                     items=processed_items,
                     message=f"Successfully loaded {saved_count} items in DRAFT state into SiRADIG Trabajador F.572.",
                     session_screenshots=session_screenshots,
-                    execution_time_seconds=round(elapsed, 2)
+                    execution_time_seconds=round(elapsed, 2),
                 )
 
             except Exception as e:
@@ -286,7 +311,7 @@ class SiRADIGAutomator:
                     fiscal_year=fiscal_year,
                     error=str(e),
                     message="Automation encountered an error. Please verify portal status or credentials in .env.",
-                    session_screenshots=[fail_shot] if fail_shot else []
+                    session_screenshots=[fail_shot] if fail_shot else [],
                 )
             finally:
                 if not self.headless:

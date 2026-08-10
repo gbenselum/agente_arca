@@ -5,7 +5,6 @@ Structured logging module for ARCA agent with secret masking and formatted outpu
 import logging
 import os
 import sys
-from typing import Optional
 
 
 def mask_secret(value: str, visible_chars: int = 2) -> str:
@@ -19,7 +18,8 @@ def mask_secret(value: str, visible_chars: int = 2) -> str:
 
 class SensitiveFilter(logging.Filter):
     """Filter that masks known sensitive patterns (Clave Fiscal, secrets) in log records."""
-    def __init__(self, secrets_to_mask: Optional[list[str]] = None):
+
+    def __init__(self, secrets_to_mask: list[str] | None = None):
         super().__init__()
         self.secrets = secrets_to_mask or []
 
@@ -31,7 +31,7 @@ class SensitiveFilter(logging.Filter):
         return True
 
 
-def setup_logging(level: str = "INFO", log_file: Optional[str] = None) -> logging.Logger:
+def setup_logging(level: str = "INFO", log_file: str | None = None) -> logging.Logger:
     """Configures structured logger for console and optional file logging."""
     logger_instance = logging.getLogger("agente_arca")
     log_level = getattr(logging, level.upper(), logging.INFO)
@@ -42,8 +42,7 @@ def setup_logging(level: str = "INFO", log_file: Optional[str] = None) -> loggin
         return logger_instance
 
     formatter = logging.Formatter(
-        fmt="%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d): %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+        fmt="%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d): %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
 
     # Console Handler

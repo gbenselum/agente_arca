@@ -3,13 +3,15 @@ Deduction Calculator & Annual Caps Engine under ARCA / AFIP RG 4003/17.
 Computes net deductible amount, category rates, and enforces annual legal caps (MNI, GNA).
 """
 
-from typing import Dict, Any, List, Optional, Union
-from ..models.invoice import InvoiceData, SiRADIGCategory
-from ..models.deduction import DeductionResult, FiscalYearCaps, AnnualDeductionSummary
+from collections.abc import Sequence
+from typing import Any
+
+from ..models.deduction import AnnualDeductionSummary, DeductionResult, FiscalYearCaps
+from ..models.invoice import InvoiceData
 from ..utils.logger import logger
 
 # Base deductible rates per RG 4003/17
-CATEGORY_RATES: Dict[str, float] = {
+CATEGORY_RATES: dict[str, float] = {
     "MEDICO_PARAMEDICO": 0.40,
     "CUOTA_MEDICO_ASSIST": 1.00,
     "GASTOS_EDUCACION": 1.00,
@@ -19,51 +21,61 @@ CATEGORY_RATES: Dict[str, float] = {
     "INTERES_HIPOTECARIO": 1.00,
     "DONACIONES": 1.00,
     "SEGUROS_VIDA_RETIRO": 1.00,
-    "GASTOS_SEPELIO": 1.00
+    "GASTOS_SEPELIO": 1.00,
 }
 
 # Fiscal year default caps (Minimo No Imponible Anual and references)
 # Figures in ARS. Can be overridden via config or parameters.
-FISCAL_YEAR_DEFAULT_CAPS: Dict[int, FiscalYearCaps] = {
+FISCAL_YEAR_DEFAULT_CAPS: dict[int, FiscalYearCaps] = {
     2024: FiscalYearCaps(
-        fiscal_year=2024,
-        mni_anual=3091035.00,
-        gna_anual=18000000.00,
-        notes="Valores RG 5531/24 - Período fiscal 2024"
+        fiscal_year=2024, mni_anual=3091035.00, gna_anual=18000000.00, notes="Valores RG 5531/24 - Período fiscal 2024"
     ),
     2025: FiscalYearCaps(
         fiscal_year=2025,
         mni_anual=4120000.00,
         gna_anual=24000000.00,
-        notes="Valores Proyectados IPC - Período fiscal 2025"
+        notes="Valores Proyectados IPC - Período fiscal 2025 (NO OFICIAL)",
     ),
     2026: FiscalYearCaps(
         fiscal_year=2026,
         mni_anual=5500000.00,
         gna_anual=32000000.00,
-        notes="Valores Estimados Base - Período fiscal 2026"
-    )
+        notes="Valores Estimados Base - Período fiscal 2026 (NO OFICIAL)",
+    ),
 }
+
+# Fiscal years whose default caps are estimates (IPC projection), not official RG values.
+# These MUST be revised once AFIP publishes the official figures for the period.
+ESTIMATED_CAP_YEARS = frozenset({2025, 2026})
 
 
 def get_fiscal_caps(fiscal_year: int) -> FiscalYearCaps:
-    """Returns official or estimated fiscal caps for a given year."""
+    """Returns official or estimated fiscal caps for a given year.
+
+    Warning: caps for fiscal years listed in ESTIMATED_CAP_YEARS are projections
+    (IPC estimates), not official AFIP figures. Always override them via
+    `custom_caps` / config once official values are published.
+    """
+    if fiscal_year in ESTIMATED_CAP_YEARS:
+        logger.warning(
+            f"Fiscal year {fiscal_year} uses ESTIMATED caps (IPC projection, not official RG). "
+            "Review values in FISCAL_YEAR_DEFAULT_CAPS before filing."
+        )
     return FISCAL_YEAR_DEFAULT_CAPS.get(
-        fiscal_year,
-        FiscalYearCaps(fiscal_year=fiscal_year, mni_anual=5500000.00, gna_anual=32000000.00)
+        fiscal_year, FiscalYearCaps(fiscal_year=fiscal_year, mni_anual=5500000.00, gna_anual=32000000.00)
     )
 
 
 def compute_deduction(
-    invoice_data: Union[InvoiceData, Dict[str, Any]],
+    invoice_data: InvoiceData | dict[str, Any],
     siradig_code: str,
     fiscal_year: int = 2026,
     cumulative_category_total: float = 0.0,
-    custom_caps: Optional[FiscalYearCaps] = None
-) -> Dict[str, Any]:
+    custom_caps: FiscalYearCaps | None = None,
+) -> DeductionResult:
     """
     Computes net deductible amount, category rate, and checks annual caps based on RG 4003/17.
-    Returns a dictionary result (fully serializable) matching DeductionResult schema.
+    Returns a typed DeductionResult (serializable via model_dump()).
     """
     if isinstance(invoice_data, InvoiceData):
         total_amount = invoice_data.total_amount
@@ -86,8 +98,8 @@ def compute_deduction(
     subtotal_before_cap = round(net_out_of_pocket * rate, 2)
 
     # Determine legal annual cap limit for this category
-    annual_cap_limit: Optional[float] = None
-    cap_description: Optional[str] = None
+    annual_cap_limit: float | None = None
+    cap_description: str | None = None
 
     if siradig_code in ("MEDICO_PARAMEDICO", "CUOTA_MEDICO_ASSIST", "DONACIONES"):
         # Capped at 5% of GNA (Ganancia Neta Anual)
@@ -114,7 +126,7 @@ def compute_deduction(
         cap_description = f"Tope legal específico RG 4003 (${annual_cap_limit:,.2f})"
 
     # Check if cumulative total exceeds the annual cap
-    warnings: List[str] = []
+    warnings: list[str] = []
     cap_exceeded = False
     computable_deduction = subtotal_before_cap
 
@@ -130,36 +142,33 @@ def compute_deduction(
             warnings.append(warn_msg)
             logger.warning(warn_msg)
 
-    result = {
-        "invoice_id": inv_id,
-        "siradig_code": siradig_code,
-        "gross_amount": total_amount,
-        "reimbursed_amount": reimbursed_amount,
-        "net_out_of_pocket": net_out_of_pocket,
-        "deductible_rate": rate,
-        "subtotal_before_cap": subtotal_before_cap,
-        "applied_annual_cap": annual_cap_limit,
-        "computable_deduction": round(computable_deduction, 2),
-        "requires_employer_cap_check": True,
-        "warnings": warnings,
-        "cap_exceeded": cap_exceeded,
-        "cap_limit_description": cap_description
-    }
-    return result
+    return DeductionResult(
+        invoice_id=inv_id,
+        siradig_code=siradig_code,
+        gross_amount=total_amount,
+        reimbursed_amount=reimbursed_amount,
+        net_out_of_pocket=net_out_of_pocket,
+        deductible_rate=rate,
+        subtotal_before_cap=subtotal_before_cap,
+        applied_annual_cap=annual_cap_limit,
+        computable_deduction=round(computable_deduction, 2),
+        requires_employer_cap_check=True,
+        warnings=warnings,
+        cap_exceeded=cap_exceeded,
+        cap_limit_description=cap_description,
+    )
 
 
 def compute_batch_deductions(
-    invoices: List[Union[InvoiceData, Dict[str, Any]]],
-    fiscal_year: int = 2026,
-    custom_caps: Optional[FiscalYearCaps] = None
+    invoices: Sequence[InvoiceData | dict[str, Any]], fiscal_year: int = 2026, custom_caps: FiscalYearCaps | None = None
 ) -> AnnualDeductionSummary:
     """
     Computes cumulative deductions across a batch of invoices, enforcing sequential category caps.
     """
     caps = custom_caps or get_fiscal_caps(fiscal_year)
-    cumulative_totals: Dict[str, float] = {}
-    category_breakdown: Dict[str, Dict[str, float]] = {}
-    all_warnings: List[str] = []
+    cumulative_totals: dict[str, float] = {}
+    category_breakdown: dict[str, dict[str, float]] = {}
+    all_warnings: list[str] = []
 
     total_gross = 0.0
     total_reimbursed = 0.0
@@ -170,7 +179,7 @@ def compute_batch_deductions(
         if isinstance(inv, InvoiceData):
             code = inv.suggested_category.value
         else:
-            code = inv.get("suggested_category", "GASTOS_EDUCACION")
+            code = inv.get("suggested_category", "UNKNOWN")
 
         current_cum = cumulative_totals.get(code, 0.0)
         res = compute_deduction(
@@ -178,28 +187,28 @@ def compute_batch_deductions(
             siradig_code=code,
             fiscal_year=fiscal_year,
             cumulative_category_total=current_cum,
-            custom_caps=caps
+            custom_caps=caps,
         )
 
-        total_gross += res["gross_amount"]
-        total_reimbursed += res["reimbursed_amount"]
-        total_net += res["net_out_of_pocket"]
-        comp = res["computable_deduction"]
+        total_gross += res.gross_amount
+        total_reimbursed += res.reimbursed_amount
+        total_net += res.net_out_of_pocket
+        comp = res.computable_deduction
         total_computable += comp
 
         cumulative_totals[code] = current_cum + comp
-        if res.get("warnings"):
-            all_warnings.extend(res["warnings"])
+        if res.warnings:
+            all_warnings.extend(res.warnings)
 
         if code not in category_breakdown:
             category_breakdown[code] = {
                 "count": 0,
                 "gross_total": 0.0,
                 "computable_total": 0.0,
-                "cap_limit": res.get("applied_annual_cap") or 0.0
+                "cap_limit": res.applied_annual_cap or 0.0,
             }
         category_breakdown[code]["count"] += 1
-        category_breakdown[code]["gross_total"] += res["gross_amount"]
+        category_breakdown[code]["gross_total"] += res.gross_amount
         category_breakdown[code]["computable_total"] += comp
 
     return AnnualDeductionSummary(
@@ -207,47 +216,47 @@ def compute_batch_deductions(
         total_invoices_evaluated=len(invoices),
         total_gross_amount=round(total_gross, 2),
         total_reimbursed_amount=round(total_reimbursed, 2),
-        total_net_of_pocket=round(total_net, 2),
+        total_net_out_of_pocket=round(total_net, 2),
         total_computable_deductions=round(total_computable, 2),
         category_breakdown=category_breakdown,
         applied_caps={k: v.get("cap_limit", 0.0) for k, v in category_breakdown.items()},
-        warnings=all_warnings
+        warnings=all_warnings,
     )
 
 
 def generate_siradig_payload(
-    taxpayer_cuit: str,
-    fiscal_year: int,
-    deductions_list: List[Dict[str, Any]]
-) -> Dict[str, Any]:
+    taxpayer_cuit: str, fiscal_year: int, deductions_list: Sequence[dict[str, Any]]
+) -> dict[str, Any]:
     """
     Compiles all validated deductions into the standard JSON format for SiRADIG F.572 Web.
     Implements the 4th tool required by mcp_tools_schema.json.
     """
-    payload = {
+    payload: dict[str, Any] = {
         "taxpayer_cuit": taxpayer_cuit.replace("-", ""),
         "fiscal_year": fiscal_year,
         "presentation_type": "DRAFT",
         "generated_by": "agente_arca_engine",
         "total_items": len(deductions_list),
-        "deductions": []
+        "deductions": [],
     }
 
     for item in deductions_list:
-        payload["deductions"].append({
-            "siradig_code": item.get("siradig_code", "GASTOS_EDUCACION"),
-            "vendor_cuit": item.get("vendor_cuit", ""),
-            "receipt_type": item.get("receipt_type", "FACTURA_B"),
-            "point_of_sale": item.get("point_of_sale"),
-            "receipt_number": item.get("receipt_number"),
-            "issue_date": item.get("issue_date", ""),
-            "total_amount": float(item.get("total_amount", 0.0)),
-            "reimbursed_amount": float(item.get("reimbursed_amount", 0.0)),
-            "cae": item.get("cae", ""),
-            "cae_due_date": item.get("cae_due_date", ""),
-            "beneficiary_cuil": item.get("beneficiary_cuil", ""),
-            "computable_deduction": float(item.get("computable_deduction", item.get("total_amount", 0.0)))
-        })
+        payload["deductions"].append(
+            {
+                "siradig_code": item.get("siradig_code", "UNKNOWN"),
+                "vendor_cuit": item.get("vendor_cuit", ""),
+                "receipt_type": item.get("receipt_type", "FACTURA_B"),
+                "point_of_sale": item.get("point_of_sale"),
+                "receipt_number": item.get("receipt_number"),
+                "issue_date": item.get("issue_date", ""),
+                "total_amount": float(item.get("total_amount", 0.0)),
+                "reimbursed_amount": float(item.get("reimbursed_amount", 0.0)),
+                "cae": item.get("cae", ""),
+                "cae_due_date": item.get("cae_due_date", ""),
+                "beneficiary_cuil": item.get("beneficiary_cuil", ""),
+                "computable_deduction": float(item.get("computable_deduction", item.get("total_amount", 0.0))),
+            }
+        )
 
     logger.info(f"Generated standard SiRADIG payload with {len(payload['deductions'])} items for CUIT {taxpayer_cuit}.")
     return payload
