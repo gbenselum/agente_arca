@@ -14,6 +14,7 @@ The agent follows a 2-step verification & extraction workflow:
 
 ```
 agente_arca/
+├── LICENSE                     # MIT License
 ├── .env.example                # Example environment file with credentials & dependents template
 ├── .env                        # Protected local environment variables (Git ignored!)
 ├── .gitignore                  # Strict Git rules preventing secret leaks
@@ -91,3 +92,9 @@ agente_arca/
 1. **Credentials Security**: Store credentials and dependent details in `.env` (protected by `.gitignore`).
 2. **Draft Mode Only**: The agent ONLY clicks **"Guardar"** (`Borrador`). **NEVER** submits the form (`Enviar al Empleador`).
 3. **Interactive Window**: Executed with `BROWSER_HEADLESS=false` so the user can inspect progress on screen inside Antigravity IDE.
+
+---
+
+## 6. License
+
+This skill and repository are licensed under the **[MIT License](LICENSE)** © 2026 Gabriel Benselum.

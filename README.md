@@ -125,6 +125,7 @@ Exposes 4 standard tools:
 
 ```
 agente_arca/
+├── LICENSE                   # MIT License
 ├── .env.example              # Credentials and dependents template
 ├── .env                      # Local secret variables (Git-ignored)
 ├── .gitignore                # Git protection rules
@@ -145,3 +146,18 @@ agente_arca/
 │   └── mcp/                  # FastMCP / JSON-RPC server for LLM tools
 └── tests/                    # Comprehensive unit & integration test suite
 ```
+
+---
+
+## 📄 License
+
+This project is licensed under the **[MIT License](LICENSE)** © 2026 Gabriel Benselum.
+
+### Third-Party Licenses & Notices
+- **Playwright**, **pytesseract**: Licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+- **pypdf**, **python-dotenv**: Licensed under [BSD-3-Clause](https://opensource.org/licenses/BSD-3-Clause).
+- **Pillow**: Licensed under [HPND / MIT-CMU](https://pillow.readthedocs.io/en/stable/releasenotes/index.html).
+- **Pydantic**: Licensed under [MIT](https://opensource.org/licenses/MIT).
+- **PyMuPDF** (optional OCR rasterizer fallback): Dual-licensed under [GNU AGPLv3](https://www.gnu.org/licenses/agpl-3.0.html) and Commercial terms. Used solely as an optional import.
+- **Argentine Fiscal Norms & Formulas** (RG 4003/17, CUIT Modulo 11): Argentine public legal provisions (*Ley 11.723, Art. 28*).
+

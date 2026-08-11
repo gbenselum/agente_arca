@@ -7,6 +7,17 @@ name = "agente-arca"
 version = "0.1.0"
 description = "ARCA / AFIP SiRADIG F.572 Web automation agent: parse, validate, compute deductions and upload drafts."
 readme = "README.md"
+authors = [
+    { name = "Gabriel Benselum" },
+]
+license = { text = "MIT" }
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 requires-python = ">=3.10"
 dependencies = [
     "python-dotenv>=1.0.0",
@@ -53,4 +64,5 @@ warn_unused_ignores = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q"
